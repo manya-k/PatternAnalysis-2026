@@ -3,14 +3,13 @@
 ## Feasibility Review
 
 **Project:** Siamese metric-learning classifier with a reject option for melanoma triage  
-**Difficulty band:** Hard (Siamese Network, ISIC; task sheet ref. [1])  
 **Dataset:** [ISIC Melanoma Dataset, resized to 224x224 (Kaggle)](https://www.kaggle.com/datasets/roua91/isic-melanoma-dataset-resized-to-224x224)
 
 ### 1. User Need, Scope and Acceptance Criteria
 
-**Intended user.** A dermatology triage clinician who reviews dermoscopic images and must decide which lesions need urgent specialist attention. The prototype is a decision-support tool, not an autonomous diagnostic device.
+**Intended user.** A dermatology triage clinician who reviews dermoscopic images and must decide which lesions need urgent specialist attention. The prototype is a decision-support tool.
 
-**Prototype purpose.** Given a dermoscopic image, the system returns (a) a benign/melanoma decision, (b) a confidence score derived from embedding distances to confirmed reference lesions, and (c) the nearest reference images as visual evidence. Cases below a validated confidence threshold are referred to a human specialist instead of being auto-decided. 
+**Prototype purpose.** Given a dermoscopic image, the system returns (a) a benign/melanoma decision, (b) a confidence score derived from embedding distance, and (c) the nearest reference images as visual evidence. Cases below a validated confidence threshold are referred to a human specialist instead of being auto-decided. 
 
 The central question is: *does the Siamese model's distance-based confidence track diagnostic correctness better than a conventional CNN's softmax confidence, and does that justify its extra cost?* A missed melanoma (false negative) is treated as far more costly than a false alarm.
 
@@ -28,18 +27,18 @@ The central question is: *does the Siamese model's distance-based confidence tra
 
 ### 2. Model Choice and Course Concepts
 
-**Dataset configuration.** According to the Kaggle data card, the dataset [7] merges ISIC 2018, 2019 and 2020 [6]. It contains 24,493 images resized to 224x224: 19,227 benign and 5,266 malignant, about 21.5% malignant after benign undersampling. Labels (`target`), image IDs (`isic_id`) and an optional `patient_id` are in `cleaned_metadata.csv`. This investigation will use a **70/15/15 train/validation/test split, stratified by class and grouped by patient** (`StratifiedGroupKFold`). Each placeholder (`dummy_*`) ID is treated as its own group, and the split is also stratified by ID type (real or placeholder), because the audit in section 3 shows the two subsets have very different melanoma rates. Augmentation will include flips, rotations, random resized crops and mild colour jitter, followed by ImageNet normalisation. 
+**Dataset configuration.** According to the Kaggle data card, the dataset [7] merges ISIC 2018, 2019 and 2020 [6]. It contains 24,493 images resized to 224x224: 19,227 benign and 5,266 malignant, about 21.5% malignant after benign undersampling. Labels (`target`), image IDs (`isic_id`) and an optional `patient_id` are in `cleaned_metadata.csv`. This investigation will use a **70/15/15 train/validation/test split, stratified by class and grouped by patient** (`StratifiedGroupKFold`). Each placeholder (`dummy_*`) ID is treated as its own group, and the split is also stratified by ID type (real or placeholder), because the audit shows the two subsets have very different melanoma rates. Augmentation will include flips, rotations, random resized crops and mild colour jitter, followed by ImageNet normalisation. 
 
 **Proposed model.**
-- **Encoder:** an ImageNet-pretrained ResNet-18 [2] with its classifier removed. A projection head (512 -> 256 -> 128, ReLU between the layers) produces an L2-normalised 128-dimensional embedding. 
-- **Siamese training [1]:** both images in a pair pass through the *same* encoder, which shares its weights. Training uses contrastive loss
+- **Encoder:** an ImageNet-pretrained ResNet-18 with its classifier removed. A projection head (512 -> 256 -> 128, ReLU between the layers) produces an L2-normalised 128-dimensional embedding. 
+- **Siamese training:** both images in a pair pass through the *same* encoder, which shares its weights. Training uses contrastive loss
 - **Pair generation:** new pairs are sampled every epoch, with equal numbers of same-class and different-class pairs. Malignant anchors are oversampled so the loss is not dominated by benign–benign pairs.
 - **Inference:** the *training* split is embedded once to form a reference bank. A query is classified by distance-weighted k-nearest neighbours. Its confidence is the weighted vote fraction for the predicted class. Test images are never used as references.
-- **Baseline:** the same pretrained ResNet-18 with a two-class softmax head, trained with class-weighted cross-entropy on the identical split and augmentation. Sharing the backbone isolates the effect of *metric learning versus direct classification* from the effect of the architecture. The baseline is temperature-scaled [4] before the uncertainty comparison.
+- **Baseline:** the same pretrained ResNet-18 with a two-class softmax head, trained with class-weighted cross-entropy on the identical split and augmentation. Sharing the backbone isolates the effect of *metric learning versus direct classification* from the effect of the architecture. The baseline is temperature-scale before the uncertainty comparison.
 
 **Course concepts and literature.** The design draws on the following:
 - convolutional feature extraction and transfer learning;
-- metric and contrastive learning [1], [3];
+- metric and contrastive learning;
 - handling class imbalance through sampling;
 
 
@@ -56,13 +55,11 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 | Class counts | benign 19,227, malignant 5,266 (21.5%); matches the data card |
 | Images with a real `patient_id` | 13,699 images from 4,432 patients (1–43 images each, median 1); 372 patients have both benign and malignant lesions |
 | Images with a placeholder `patient_id` (`dummy_*`) | 10,794 (44.1%), using 10,514 distinct placeholder IDs; 280 placeholders are shared by more than one image |
-| Exact duplicate images (MD5 of file bytes) | 0 |
+| Exact duplicate images | 0; the 919 `ISIC_*_downsampled` files have no un-suffixed twin |
 | Malignant rate by `patient_id` type | placeholder ID: **37.7%** (4,071 / 10,794); real ID: **8.7%** (1,195 / 13,699) |
 | Melanomas in the older `isic_id` range (< `ISIC_0100000`) | **89.0%** (4,685 / 5,266), versus 45.0% of benign images |
-| Patient overlap after split | must be 0, measured `TODO` |
-| Baseline smoke test (1 epoch, subset) | val AUROC `TODO`, time `TODO` s |
-| Siamese smoke test, peak VRAM | `TODO` GiB at batch `TODO` pairs, AMP (*estimate*: about 3–5 GiB for 32 pairs, i.e. 64 images, with ResNet-18 at 224x224) |
-| Hardware | Rangpur GPU `TODO` |
+| Patient-grouped split (seed 42) | train 17,208 (70.3%) / val 3,649 (14.9%) / test 3,636 (14.8%); malignant 21.4% / 21.4% / 21.9%; placeholder IDs 43.9% / 44.6% / 44.5% |
+| Patient overlap after split | **0** patients in more than one split |
 
 ### 4. Risks, Budget and Fallback
 
