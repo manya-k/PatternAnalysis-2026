@@ -13,6 +13,20 @@
 
 The central question is: *does the Siamese model's distance-based confidence track diagnostic correctness better than a conventional CNN's softmax confidence, and does that justify its extra cost?* A missed melanoma (false negative) is treated as far more costly than a false alarm.
 
+**Scope.**
+
+*In scope:*
+- Binary classification (benign vs. melanoma) of single 224x224 dermoscopic images from the Kaggle ISIC dataset, using only the image and its label. Patient metadata such as age, sex and lesion site is not used as a model input.
+- A Siamese network (shared ResNet-18 encoder, contrastive loss) and a conventional CNN baseline, trained and evaluated on the same patient-grouped train/validation/test split.
+- Distance-based confidence, a reject (refer-to-specialist) rule chosen on validation data, and a calibration and uncertainty comparison against the baseline.
+- Profiling of computational cost (parameters, peak VRAM, inference latency), a failure-case autopsy of 3–5 errors, and a written deployment recommendation.
+
+*Out of scope:*
+- Clinical validation or regulatory approval. Results are a research prototype on retrospective public data, not evidence of real-world diagnostic safety.
+- Multi-class lesion diagnosis (e.g. basal cell carcinoma or keratosis subtypes), lesion segmentation, and full-resolution images.
+- Screening-prevalence estimates. The dataset's ~21.5% melanoma rate is artificially high, so precision and positive predictive value will not transfer to a real clinic (<2% malignant).
+- Deployment engineering such as a user interface, integration with clinical records, or on-device inference.
+
 **Acceptance criteria.** All are measured on a held-out test split that is only used once, after every choice has been fixed on validation data.
 
 1. **Leakage-free data.** Train, validation and test splits share no `patient_id`. Exact duplicate images, found by file hash, are removed before splitting. Pairs are generated only *within* a split. Images without a `patient_id` are counted and reported. The split is saved to disk with a fixed seed so it can be reproduced.
