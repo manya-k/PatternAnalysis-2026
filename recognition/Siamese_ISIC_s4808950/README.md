@@ -11,7 +11,7 @@
 
 **Prototype purpose.** Given a dermoscopic image, the system returns (a) a benign/melanoma decision, (b) a confidence score derived from embedding distance, and (c) the nearest reference images as visual evidence. Cases below a validated confidence threshold are referred to a human specialist instead of being auto-decided. 
 
-The central question is: *does the Siamese model's distance-based confidence track diagnostic correctness better than a conventional CNN's softmax confidence, and does that justify its extra cost?* A missed melanoma (false negative) is treated as far more costly than a false alarm.
+The central question is: does the Siamese model's distance-based confidence track diagnostic correctness better than a conventional CNN's softmax confidence, and does that justify its extra cost?* A missed melanoma (false negative) is treated as far more costly than a false alarm.
 
 **Scope.**
 
@@ -29,7 +29,7 @@ The central question is: *does the Siamese model's distance-based confidence tra
 
 **Acceptance criteria.** All are measured on a held-out test split that is only used once, after every choice has been fixed on validation data.
 
-1. **Leakage-free data.** Train, validation and test splits share no `patient_id`. Exact duplicate images, found by file hash, are removed before splitting. Pairs are generated only *within* a split. Images without a `patient_id` are counted and reported. The split is saved to disk with a fixed seed so it can be reproduced.
+1. **Leakage-free data.** Train, validation and test splits share no `patient_id`. Exact duplicate images, found by file hash, are removed before splitting. Pairs are generated only within a split. The number of images with a true patient ID, a lesion-only ID, or no ID is reported, and the patient-level guarantee is claimed only for the true-patient subset. The split is saved to disk with a fixed seed so it can be reproduced.
 
 2. **Discrimination:** The Siamese model reaches test accuracy of about **0.80** according to the task sheet. It also reports per-class precision and recall, macro-F1, AUROC and PR-AUC, compared with the baseline on the same test images.
 
@@ -41,7 +41,7 @@ The central question is: *does the Siamese model's distance-based confidence tra
 
 ### 2. Model Choice and Course Concepts
 
-**Dataset configuration.** According to the Kaggle data card, the dataset [7] merges ISIC 2018, 2019 and 2020 [6]. It contains 24,493 images resized to 224x224: 19,227 benign and 5,266 malignant, about 21.5% malignant after benign undersampling. Labels (`target`), image IDs (`isic_id`) and an optional `patient_id` are in `cleaned_metadata.csv`. This investigation will use a **70/15/15 train/validation/test split, stratified by class and grouped by patient** (`StratifiedGroupKFold`). Each placeholder (`dummy_*`) ID is treated as its own group, and the split is also stratified by ID type (real or placeholder), because the audit shows the two subsets have very different melanoma rates. Augmentation will include flips, rotations, random resized crops and mild colour jitter, followed by ImageNet normalisation. 
+**Dataset configuration.** According to the Kaggle data card, the dataset [7] merges ISIC 2018, 2019 and 2020 [6]. It contains 24,493 images resized to 224x224: 19,227 benign and 5,266 malignant, about 21.5% malignant after benign undersampling. Labels (`target`), image IDs (`isic_id`) and an optional `patient_id` are in `cleaned_metadata.csv`. The `patient_id` column holds three kinds of identifier (see section 3): true ISIC 2020 patient IDs (`IP_*`), HAM10000 lesion IDs (`HAM_*`), which identify a lesion rather than a person, and placeholders (`dummy_*`) where no ID exists. This investigation will use a **70/15/15 train/validation/test split, stratified by class and grouped by `patient_id`** (`StratifiedGroupKFold`). Each `HAM_*` and `dummy_*` ID forms its own group. The split is also stratified by ID source (`IP` / `HAM` / `dummy`), because the three sources have very different melanoma rates. Augmentation will include flips, rotations, random resized crops and mild colour jitter, followed by ImageNet normalisation. 
 
 **Proposed model.**
 - **Encoder:** an ImageNet-pretrained ResNet-18 with its classifier removed. A projection head (512 -> 256 -> 128, ReLU between the layers) produces an L2-normalised 128-dimensional embedding. 
@@ -67,19 +67,21 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 | Local size / image format | 399 MB on disk; all 24,493 files are 224x224 JPEGs (6–38 KB each) |
 | Images found vs metadata rows | 24,493 / 24,493; no missing files, no orphan files, no repeated `isic_id` |
 | Class counts | benign 19,227, malignant 5,266 (21.5%); matches the data card |
-| Images with a real `patient_id` | 13,699 images from 4,432 patients (1–43 images each, median 1); 372 patients have both benign and malignant lesions |
-| Images with a placeholder `patient_id` (`dummy_*`) | 10,794 (44.1%), using 10,514 distinct placeholder IDs; 280 placeholders are shared by more than one image |
+| `IP_*`: true patient IDs (ISIC 2020) | 11,186 images (45.7%) from 1,919 patients (1–43 images each, median 4); 372 patients have both benign and malignant lesions |
+| `HAM_*`: HAM10000 lesion IDs, not patient IDs | 2,513 images (10.3%), one image per ID, so grouping by them gives no patient-level protection |
+| `dummy_*`: placeholders, no ID | 10,794 images (44.1%), using 10,514 distinct placeholders; 280 placeholders are shared by two images, and 130 of these pair a benign with a malignant image, so they are unlikely to be real patients |
 | Exact duplicate images | 0; the 919 `ISIC_*_downsampled` files have no un-suffixed twin |
-| Malignant rate by `patient_id` type | placeholder ID: **37.7%** (4,071 / 10,794); real ID: **8.7%** (1,195 / 13,699) |
+| Malignant rate by ID source | `dummy`: **37.7%** (4,071 / 10,794); `HAM`: **24.4%** (614 / 2,513); `IP`: **5.2%** (581 / 11,186) |
+| Share of all melanomas by ID source | `dummy` 77.3%, `HAM` 11.7%, `IP` 11.0% |
 | Melanomas in the older `isic_id` range (< `ISIC_0100000`) | **89.0%** (4,685 / 5,266), versus 45.0% of benign images |
-| Patient-grouped split (seed 42) | train 17,208 (70.3%) / val 3,649 (14.9%) / test 3,636 (14.8%); malignant 21.4% / 21.4% / 21.9%; placeholder IDs 43.9% / 44.6% / 44.5% |
-| Patient overlap after split | **0** patients in more than one split |
+| Patient-grouped split (seed 42) | train 17,208 (70.3%) / val 3,649 (14.9%) / test 3,636 (14.8%); malignant 21.4% / 21.4% / 21.9%; ID source `IP`/`HAM`/`dummy` within 1 percentage point of 45.7% / 10.3% / 44.1% in every split. *These numbers come from the current 2-way (class × placeholder) stratification and will be refreshed after switching to 3-way ID-source stratification.* |
+| Patient overlap after split | **0** `patient_id`s in more than one split |
 
 ### 4. Risks, Budget and Fallback
 
 **Key technical risks.**
-1. **Patient leakage.** 10,794 images (44%) have placeholder `dummy_*` IDs. The same lesion, or the same patient, may therefore appear in more than one split under different placeholders, or as re-encoded near-duplicates that an MD5 check cannot catch. *Mitigation:* use a patient-grouped split. Treat each placeholder ID as its own group, so the 280 shared placeholders keep their images together. Run a perceptual-hash check for near-duplicates across splits. Report the leakage guarantee only for the real-ID subset, and state the remaining risk as a limitation.
-2. **Source shortcut (confirmed by the audit).** 89% of melanomas lie in the older `isic_id` range. Images with placeholder IDs are 37.7% malignant, compared with 8.7% for images with real IDs. The model could partly learn archive-specific appearance. *Mitigation:* stratify the split by both class and ID type. Report every metric separately for the real-ID (ISIC 2020-style) subset and the placeholder-ID subset. Check whether high-confidence errors cluster by source in the failure autopsy.
+1. **Patient leakage.** Only 11,186 images (45.7%, `IP_*`) carry a true patient ID. The other 13,307 have either a lesion ID (`HAM_*`) or no ID (`dummy_*`). The same patient, or the same lesion, may therefore appear in more than one split, or as re-encoded near-duplicates that an MD5 check cannot catch. *Mitigation:* use a `patient_id`-grouped split, so the `IP_*` subset is patient-disjoint and shared placeholders keep their images together. Run a perceptual-hash check for near-duplicates across splits. Claim the patient-level guarantee only for the `IP_*` subset, and state the remaining risk as a limitation.
+2. **Source shortcut (confirmed by the audit).** 89% of melanomas lie in the older `isic_id` range. Melanoma rates differ sharply by ID source: 37.7% (`dummy`), 24.4% (`HAM`) and 5.2% (`IP`). The model could partly learn archive-specific appearance (camera, resolution, framing) instead of the pathology. *Mitigation:* stratify the split by class and ID source. Report every metric separately for the `IP`, `HAM` and `dummy` subsets. Check whether high-confidence errors cluster by source in the failure autopsy.
 3. **Ineffective pair sampling.** Random pairs are mostly easy, so contrastive loss can plateau. *Mitigation:* oversample malignant anchors, select checkpoints by validation kNN AUROC rather than pair loss, and try triplet loss with batch-hard mining as an ablation.
 
 

@@ -11,7 +11,11 @@ import argparse
 import os
 
 import pandas as pd
+import torch
+from PIL import Image
 from sklearn.model_selection import StratifiedGroupKFold
+from torch.utils.data import Dataset
+from torchvision import transforms
 
 METADATA_FILE = "cleaned_metadata.csv"
 IMAGE_DIR = "combined_images"
@@ -41,9 +45,15 @@ def load_metadata(data_root):
             - placeholder_id: True if the patient ID is a placeholder, False otherwise.
     """
     df = pd.read_csv(os.path.join(data_root, METADATA_FILE))
+
+    print(df["patient_id"].str.split("_").str[0].value_counts(), "\n")
+    print(df.groupby(df["patient_id"].str.split("_").str[0])["patient_id"].nunique(), "\n")
+
     df["target"] = df["target"].astype(int)
     # Add a boolean column to distinguish real patient IDs from placeholders.
     df["placeholder_id"] = df["patient_id"].str.startswith("dummy")
+    print(f'{len(df)} images, {df["patient_id"].str.split("_").str[0].nunique()} patient IDs, {df["placeholder_id"].sum()} placeholders')
+ 
     # Add a column with the full path to each image.
     df["path"] = df["isic_id"].map(lambda i: os.path.join(data_root, IMAGE_DIR, f"{i}.jpg"))
     return df
