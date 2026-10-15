@@ -31,6 +31,9 @@ N_FOLDS = 20
 TEST_FOLDS = range(0, 3)
 VAL_FOLDS = range(3, 6)
 
+# Kinds of patient_id, identified by prefix.
+ID_SOURCES = ("IP", "HAM", "dummy")
+
 
 def load_metadata(data_root):
     """
@@ -40,20 +43,22 @@ def load_metadata(data_root):
     Returns:
         A pandas DataFrame with the following columns:
             - isic_id: the unique identifier for each image.
-            - patient_id: the unique identifier for each patient.
+            - patient_id: patient, lesion or placeholder identifier (see id_source).
             - target: 0 for benign, 1 for malignant.
-            - placeholder_id: True if the patient ID is a placeholder, False otherwise.
+            - id_source: "IP" (true ISIC 2020 patient ID), "HAM" (HAM10000 lesion ID,
+              not a patient) or "dummy" (placeholder, no ID available).
+            - path: full path to the image file.
     """
     df = pd.read_csv(os.path.join(data_root, METADATA_FILE))
-
-    print(df["patient_id"].str.split("_").str[0].value_counts(), "\n")
-    print(df.groupby(df["patient_id"].str.split("_").str[0])["patient_id"].nunique(), "\n")
-
     df["target"] = df["target"].astype(int)
-    # Add a boolean column to distinguish real patient IDs from placeholders.
-    df["placeholder_id"] = df["patient_id"].str.startswith("dummy")
-    print(f'{len(df)} images, {df["patient_id"].str.split("_").str[0].nunique()} patient IDs, {df["placeholder_id"].sum()} placeholders')
- 
+
+    # The patient_id prefix tells us what kind of ID it is (see id_source above).
+    df["id_source"] = df["patient_id"].str.split("_").str[0]
+    print(f"ID sources: {df['id_source'].value_counts().to_dict()}")
+    unknown = set(df["id_source"]) - set(ID_SOURCES)
+    if unknown:
+        raise ValueError(f"Unexpected patient_id prefixes: {unknown}")
+
     # Add a column with the full path to each image.
     df["path"] = df["isic_id"].map(lambda i: os.path.join(data_root, IMAGE_DIR, f"{i}.jpg"))
     return df
@@ -63,11 +68,12 @@ def make_splits(df, seed=42):
     """
     Assign each image to train/val/test so that no patient appears in more than one split.
 
-    Groups are patient IDs; each placeholder ID is its own group (the few placeholders
-    shared by several images keep those images together). Strata combine class and
-    ID type, giving four strata: {benign, malignant} x {real, placeholder}.
+    Groups are patient_id values: an IP patient's images stay together, and each HAM or
+    dummy ID is its own group (the few dummy IDs shared by two images keep them together).
+    Strata combine class and ID source, giving six strata:
+    {benign, malignant} x {IP, HAM, dummy}.
     """
-    strata = df["target"].astype(str) + "_" + df["placeholder_id"].astype(str)
+    strata = df["target"].astype(str) + "_" + df["id_source"]
     sgkf = StratifiedGroupKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
 
     # Assign each image to a fold, then map folds to splits.
@@ -103,7 +109,7 @@ def get_splits(data_root, seed=42):
     Saving the split guarantees that the baseline and the Siamese model are trained and
     evaluated on exactly the same images.
     """
-    # if split_file is None, use the default path in the data root.
+    # The split is saved next to the data so every script reuses it.
     split_file = os.path.join(data_root, SPLIT_FILE)
     df = load_metadata(data_root)
     if os.path.exists(split_file):
@@ -117,20 +123,27 @@ def get_splits(data_root, seed=42):
 
     else:
         df = make_splits(df, seed=seed)
-        df[["isic_id", "patient_id", "target", "placeholder_id", "split"]].to_csv(split_file, index=False)
+        df[["isic_id", "patient_id", "target", "id_source", "split"]].to_csv(split_file, index=False)
     return df
 
 
 def report_splits(df):
-    table = df.groupby(["split", "placeholder_id", "target"]).size().unstack(["placeholder_id", "target"], fill_value=0)
+    """report ID-source counts and per-split statistics used in the README data audit."""
+    for source, part in df.groupby("id_source"):
+        print(f"{source:>5}: {len(part):>6} images, {part['patient_id'].nunique():>6} unique IDs, "
+              f"malignant {part['target'].mean():.1%}")
+    print()
+
+    table = df.groupby(["split", "id_source", "target"]).size().unstack(["id_source", "target"], fill_value=0)
     print(table, "\n")
     for split, part in df.groupby("split"):
+        mix = part["id_source"].value_counts(normalize=True)
         print(f"{split:>5}: {len(part):>6} images ({len(part) / len(df):.1%}), "
-              f"{part['patient_id'].nunique():>6} patient groups, "
+              f"{part['patient_id'].nunique():>6} ID groups, "
               f"malignant {part['target'].mean():.1%}, "
-              f"placeholder IDs {part['placeholder_id'].mean():.1%}")
+              f"IP/HAM/dummy {mix.get('IP', 0):.1%} / {mix.get('HAM', 0):.1%} / {mix.get('dummy', 0):.1%}")
     overlap = df.groupby("patient_id")["split"].nunique().gt(1).sum()
-    print(f"\npatients in more than one split: {overlap}")
+    print(f"\npatient IDs in more than one split: {overlap}")
 
 
 if __name__ == "__main__":
