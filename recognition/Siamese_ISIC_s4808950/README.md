@@ -74,7 +74,7 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 | Malignant rate by ID source | `dummy`: **37.7%** (4,071 / 10,794); `HAM`: **24.4%** (614 / 2,513); `IP`: **5.2%** (581 / 11,186) |
 | Share of all melanomas by ID source | `dummy` 77.3%, `HAM` 11.7%, `IP` 11.0% |
 | Melanomas in the older `isic_id` range (< `ISIC_0100000`) | **89.0%** (4,685 / 5,266), versus 45.0% of benign images |
-| Patient-grouped split (seed 42) | train 17,208 (70.3%) / val 3,649 (14.9%) / test 3,636 (14.8%); malignant 21.4% / 21.4% / 21.9%; ID source `IP`/`HAM`/`dummy` within 1 percentage point of 45.7% / 10.3% / 44.1% in every split. *These numbers come from the current 2-way (class × placeholder) stratification and will be refreshed after switching to 3-way ID-source stratification.* |
+| Patient-grouped split (seed 42, stratified by class × ID source) | train 17,253 (70.4%) / val 3,687 (15.1%) / test 3,553 (14.5%); malignant 21.2% / 21.5% / 22.9%; `IP`/`HAM`/`dummy` 46.0/10.2/43.9% (train), 46.0/10.1/43.9% (val), 43.9/10.9/45.3% (test). Exact balance is limited because `IP` patients (up to 43 images each) cannot be divided between splits. |
 | Patient overlap after split | **0** `patient_id`s in more than one split |
 
 ### 4. Risks, Budget and Fallback
