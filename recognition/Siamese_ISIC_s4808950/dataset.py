@@ -64,6 +64,100 @@ def load_metadata(data_root):
     return df
 
 
+
+def build_transforms(train):
+    """Training augmentation, or deterministic preprocessing for val/test/inference."""
+    normalize = transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
+    if not train:
+        return transforms.Compose([transforms.ToTensor(), normalize])
+    # Dermoscopic lesions have no canonical orientation, so flips and rotations are safe.
+    # Colour jitter is kept mild: colour is diagnostically meaningful for melanoma.
+    return transforms.Compose([
+        transforms.RandomResizedCrop(IMAGE_SIZE, scale=(0.8, 1.0), ratio=(0.9, 1.1)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(30),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.02),
+        transforms.ToTensor(),
+        normalize,
+    ])
+
+
+class LesionDataset(Dataset):
+    """
+    Single images from one split.
+
+    Used to train the baseline, to embed the Siamese reference bank and for evaluation.
+    Returns (image, target, row) where ``row`` indexes ``self.df`` so predictions can be
+    traced back to an ``isic_id`` and ID type for failure analysis.
+    """
+
+    def __init__(self, df, split, transform=None):
+        self.df = df[df["split"] == split].reset_index(drop=True)
+        self.transform = transform or build_transforms(train=False)
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, i):
+        image = Image.open(self.df.at[i, "path"]).convert("RGB")
+        return self.transform(image), int(self.df.at[i, "target"]), i
+
+    @property
+    def targets(self):
+        return torch.tensor(self.df["target"].values)
+
+
+class PairDataset(Dataset):
+    """
+    Image pairs for contrastive training, drawn from a single split only.
+
+    Each item picks an anchor class with equal probability (so malignant anchors are
+    oversampled relative to their 21.5% share), then a same-class or different-class
+    partner with equal probability. The four pair types (mal-mal, mal-ben, ben-ben,
+    ben-mal) each make up ~25% of an epoch.
+
+    Pairs are random but reproducible: item ``i`` in epoch ``e`` is always the same pair.
+    Call ``set_epoch(e)`` at the start of each epoch to draw fresh pairs.
+
+    Returns (image_a, image_b, same) where ``same`` is 1.0 for a same-class pair.
+    """
+
+    def __init__(self, df, split, pairs_per_epoch=None, transform=None, seed=0):
+        self.images = LesionDataset(df, split, transform or build_transforms(train=True))
+        targets = self.images.targets
+        self.by_class = {c: torch.nonzero(targets == c).flatten() for c in (0, 1)}
+        self.pairs_per_epoch = pairs_per_epoch or len(self.images)
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __len__(self):
+        return self.pairs_per_epoch
+
+    def _sample(self, cls, g):
+        pool = self.by_class[cls]
+        return int(pool[torch.randint(len(pool), (1,), generator=g)])
+
+    def __getitem__(self, i):
+        # Seeding per item (not per worker) keeps pairs identical across num_workers settings.
+        g = torch.Generator().manual_seed(self.seed * 1_000_003 + self.epoch * 10_000_019 + i)
+        anchor_cls = int(torch.randint(2, (1,), generator=g))
+        same = bool(torch.randint(2, (1,), generator=g))
+        partner_cls = anchor_cls if same else 1 - anchor_cls
+
+        a = self._sample(anchor_cls, g)
+        b = self._sample(partner_cls, g)
+        while same and b == a:  # never pair an image with itself
+            b = self._sample(partner_cls, g)
+
+        image_a, _, _ = self.images[a]
+        image_b, _, _ = self.images[b]
+        return image_a, image_b, torch.tensor(float(same))
+
+
 def make_splits(df, seed=42):
     """
     Assign each image to train/val/test so that no patient appears in more than one split.

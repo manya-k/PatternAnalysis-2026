@@ -60,7 +60,7 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 
 ### 3. Preliminary Feasibility Evidence
 
-> **Status:** The smoke-test rows are still to be run. Values marked *(estimate)* have not been measured yet.
+> **Status:** The data audit, split and baseline smoke test have been run. The Siamese smoke test and the peak-GPU-memory measurement (which needs CUDA on Rangpur) are still to come.
 
 | Check | Result |
 |---|---|
@@ -76,6 +76,8 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 | Melanomas in the older `isic_id` range (< `ISIC_0100000`) | **89.0%** (4,685 / 5,266), versus 45.0% of benign images |
 | Patient-grouped split (seed 42, stratified by class × ID source) | train 17,253 (70.4%) / val 3,687 (15.1%) / test 3,553 (14.5%); malignant 21.2% / 21.5% / 22.9%; `IP`/`HAM`/`dummy` 46.0/10.2/43.9% (train), 46.0/10.1/43.9% (val), 43.9/10.9/45.3% (test). Exact balance is limited because `IP` patients (up to 43 images each) cannot be divided between splits. |
 | Patient overlap after split | **0** `patient_id`s in more than one split |
+| Baseline model | Pretrained ResNet-18 + `Linear(512→2)`: 11,177,538 trainable parameters |
+| Baseline smoke test (1,000 train / 500 val images, 2 epochs, batch 32, Apple M5 Pro GPU via MPS) | runs end to end; val AUROC 0.873 → 0.874, val loss 0.523 → 0.437; about 40 s per epoch; total 1.3 min. Pipeline check only, not a performance result |
 
 ### 4. Risks, Budget and Fallback
 
