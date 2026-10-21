@@ -88,6 +88,33 @@ class SiameseNet(nn.Module):
         return self.embed(a), self.embed(b)
 
 
+class ContrastiveLoss(nn.Module):
+    """
+    Contrastive loss (Hadsell, Chopra and LeCun, 2006).
+
+        L = same * d^2 + (1 - same) * max(0, margin - d)^2,   averaged over the batch
+
+    where d is the Euclidean distance between the two embeddings and same is 1 for a
+    same-class pair, 0 otherwise. Same-class pairs are pulled together (d -> 0);
+    different-class pairs are pushed apart until they are at least `margin` apart, after
+    which they no longer contribute.
+
+    Implementation inspired by H. Sulakhe, siamesenetworks-pytorch, loss.py:
+    https://github.com/HarshSulakhe/siamesenetworks-pytorch/blob/master/loss.py
+
+    """
+
+    def __init__(self, margin=1.0):
+        super().__init__()
+        self.margin = margin
+
+    def forward(self, emb_a, emb_b, same):
+        # eps avoids an undefined gradient when two embeddings are identical (d = 0).
+        d = F.pairwise_distance(emb_a, emb_b, eps=1e-6)
+        positive = same * d.pow(2)
+        negative = (1 - same) * F.relu(self.margin - d).pow(2)
+        return (positive + negative).mean()
+
 def count_parameters(model):
     """Number of trainable parameters, for the README's computational cost report."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -111,7 +138,4 @@ if __name__ == "__main__":
     other_images = torch.randn(4, 3, 224, 224)
     with torch.no_grad():
         emb_a, emb_b = siamese(images, other_images)
-
-    # need a loss function atm
     print(f"\nSiameseNet: pair of {tuple(images.shape)} -> embeddings {tuple(emb_a.shape)}, {tuple(emb_b.shape)}")
-    print(f"embedding lengths: {emb_a.norm(dim=1)}, {emb_b.norm(dim=1)}")
