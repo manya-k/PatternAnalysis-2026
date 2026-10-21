@@ -64,8 +64,21 @@ class BaselineClassifier(nn.Module):
 class SiameseNet(nn.Module):
     """
     Siamese network: one shared encoder applied to both images of a pair.
-    """
 
+    The encoder is the same pretrained ResNet-18 backbone as the baseline, followed by a
+    projection head (512 -> 256 -> 128). Embeddings are L2-normalised to length 1, so
+    distances between them always lie in [0, 2] and are comparable across images.
+
+    The layers are created once in __init__, so both images of a pair pass through
+    exactly the same weights.
+
+    forward(a, b) returns the two embeddings, for training with ContrastiveLoss.
+    embed(x) embeds single images, used after training to build the kNN reference bank
+    and to classify validation/test images.
+
+    Input:  images [B, 3, 224, 224], normalised with ImageNet statistics.
+    Output: embeddings [B, 128], each with L2 norm 1.
+    """
     def __init__(self, pretrained=True):
         super().__init__()
         self.backbone = build_resnet18_backbone(pretrained)
@@ -98,6 +111,7 @@ class ContrastiveLoss(nn.Module):
     same-class pair, 0 otherwise. Same-class pairs are pulled together (d -> 0);
     different-class pairs are pushed apart until they are at least `margin` apart, after
     which they no longer contribute.
+
 
     Implementation inspired by H. Sulakhe, siamesenetworks-pytorch, loss.py:
     https://github.com/HarshSulakhe/siamesenetworks-pytorch/blob/master/loss.py
