@@ -77,6 +77,7 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 | Patient-grouped split (seed 42, stratified by class × ID source) | train 17,253 (70.4%) / val 3,687 (15.1%) / test 3,553 (14.5%); malignant 21.2% / 21.5% / 22.9%; `IP`/`HAM`/`dummy` 46.0/10.2/43.9% (train), 46.0/10.1/43.9% (val), 43.9/10.9/45.3% (test). Exact balance is limited because `IP` patients (up to 43 images each) cannot be divided between splits. |
 | Patient overlap after split | **0** `patient_id`s in more than one split |
 | Baseline model | Pretrained ResNet-18 + `Linear(512→2)`: 11,177,538 trainable parameters |
+| Siamese model | Same pretrained ResNet-18 + projection head (512→256→128, L2-normalised): 11,340,736 trainable parameters (+1.5%); output shapes, unit-length embeddings, weight sharing and contrastive-loss values checked on synthetic inputs |
 | Baseline smoke test (1,000 train / 500 val images, 2 epochs, batch 32, Apple M5 Pro GPU via MPS) | runs end to end; val AUROC 0.873 → 0.874, val loss 0.523 → 0.437; about 40 s per epoch; total 1.3 min. Pipeline check only, not a performance result |
 
 ### 4. Risks, Budget and Fallback

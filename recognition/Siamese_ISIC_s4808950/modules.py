@@ -2,16 +2,21 @@
 Model components for melanoma classification.
 
 1. BaselineClassifier: a standard CNN classifier, used as the comparison model.
+2. SiameseNet: one shared encoder that maps each image of a pair to a 128-d embedding of length 1.
+3. ContrastiveLoss: pulls same-class pairs together, pushes different-class pairs apart.
 
 Every model here is built from PyTorch only (no NumPy), as the task requires.
 """
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torchvision.models import ResNet18_Weights, resnet18
 
 NUM_CLASSES = 2          # 0 = benign, 1 = melanoma
 RESNET18_FEATURES = 512  # size of ResNet-18's output before its final layer
+EMBEDDING_HIDDEN = 256   # projection head: 512 -> 256 -> 128
+EMBEDDING_DIM = 128
 
 
 def build_resnet18_backbone(pretrained=True):
@@ -56,6 +61,33 @@ class BaselineClassifier(nn.Module):
         return self.classifier(features)
 
 
+class SiameseNet(nn.Module):
+    """
+    Siamese network: one shared encoder applied to both images of a pair.
+    """
+
+    def __init__(self, pretrained=True):
+        super().__init__()
+        self.backbone = build_resnet18_backbone(pretrained)
+        self.head = nn.Sequential(
+            nn.Linear(RESNET18_FEATURES, EMBEDDING_HIDDEN),
+            nn.ReLU(inplace=True),
+            nn.Linear(EMBEDDING_HIDDEN, EMBEDDING_DIM),
+        )
+
+    def embed(self, x):
+        # [B, 3, 224, 224] -> [B, 512] - general visual features from ResNet-18
+        features = self.backbone(x)
+        # [B, 512] -> [B, 128]: projection head learns features for comparing lesions
+        embeddings = self.head(features)
+        # rescale each embedding to length 1
+        return F.normalize(embeddings, p=2, dim=1)
+
+    def forward(self, a, b):
+        # the same embed() (same weights) is used for both images
+        return self.embed(a), self.embed(b)
+
+
 def count_parameters(model):
     """Number of trainable parameters, for the README's computational cost report."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -73,3 +105,13 @@ if __name__ == "__main__":
     print(f"BaselineClassifier: input {tuple(images.shape)} -> logits {tuple(logits.shape)}")
     print(f"probabilities sum to 1: {torch.allclose(logits.softmax(dim=1).sum(dim=1), torch.ones(4))}")
     print(f"trainable parameters: {count_parameters(model):,}")
+
+    # Siamese network: check embedding shapes, unit length and parameter count.
+    siamese = SiameseNet(pretrained=True).eval()
+    other_images = torch.randn(4, 3, 224, 224)
+    with torch.no_grad():
+        emb_a, emb_b = siamese(images, other_images)
+
+    # need a loss function atm
+    print(f"\nSiameseNet: pair of {tuple(images.shape)} -> embeddings {tuple(emb_a.shape)}, {tuple(emb_b.shape)}")
+    print(f"embedding lengths: {emb_a.norm(dim=1)}, {emb_b.norm(dim=1)}")
