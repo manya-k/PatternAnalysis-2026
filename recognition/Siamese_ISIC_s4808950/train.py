@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--subset", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
@@ -115,6 +116,22 @@ def evaluate(model, loader, loss_fn, device):
     }
 
 
+def plot_history(history, path):
+    """Training/validation loss and validation AUROC per epoch."""
+    epochs = [h["epoch"] for h in history]
+    fig, (ax_loss, ax_auc) = plt.subplots(1, 2, figsize=(10, 4))
+    ax_loss.plot(epochs, [h["train_loss"] for h in history], marker="o", label="train")
+    ax_loss.plot(epochs, [h["val_loss"] for h in history], marker="o", label="validation")
+    ax_loss.set(xlabel="epoch", ylabel="weighted cross-entropy", title="Loss")
+    ax_loss.legend()
+    ax_auc.plot(epochs, [h["val_auroc"] for h in history], marker="o", color="tab:green")
+    ax_auc.set(xlabel="epoch", ylabel="AUROC", title="Validation AUROC", ylim=(0.5, 1.0))  # 0.5 = chance
+    for ax in (ax_loss, ax_auc):
+        ax.xaxis.get_major_locator().set_params(integer=True)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
 
 def main():
     args = parse_args()
@@ -138,6 +155,7 @@ def main():
     print(f"device {device} | train {len(train_set)} | val {len(val_set)} | "
           f"class weights {[round(w, 2) for w in weights.tolist()]} | parameters {count_parameters(model):,}")
 
+    weights_path = os.path.join(OUT_DIR, f"{args.model}_best.pt")
     history, best_auroc, epochs_since_best = [], -1.0, 0
     start = time.time()
     for epoch in range(1, args.epochs + 1):
@@ -153,9 +171,13 @@ def main():
         # Keep the weights with the best validation AUROC; stop early if it stops improving.
         if val["auroc"] > best_auroc:
             best_auroc, epochs_since_best = val["auroc"], 0
-
+            # save the weights of the best model so far, for later evaluation on the test split
+            torch.save(model.state_dict(), weights_path)
         else:
             epochs_since_best += 1
+            if epochs_since_best >= args.patience:
+                print(f"early stopping: no improvement for {args.patience} epochs")
+                break
 
     summary = {
         "model": args.model, "device": str(device), "args": vars(args),
@@ -163,7 +185,13 @@ def main():
         "total_minutes": (time.time() - start) / 60,
         "history": history,
     }
-    print(summary)
+    # saving for logs and later analysis
+    with open(os.path.join(OUT_DIR, f"{args.model}_history.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+    plot_history(history, os.path.join(OUT_DIR, f"{args.model}_curves.png"))
+
+    print(f"best val AUROC {best_auroc:.4f} | weights -> {weights_path}")
+
 
 if __name__ == "__main__":
     main()
