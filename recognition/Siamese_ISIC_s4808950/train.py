@@ -1,10 +1,12 @@
 """
 Train and validate the models, saving the best weights and the training curves.
 
-Stage 3: baseline classifier only. The Siamese model is added later via --model siamese.
+  --model baseline: ResNet-18 classifier trained with class-weighted cross-entropy.
+  --model siamese:  Siamese network trained on image pairs with contrastive loss,
 
 Usage example:
     python train.py --model baseline --subset 1000 --epochs 1
+    python train.py --model siamese  --subset 1000 --epochs 1
 
 The test split is never touched here; it is only used for the final evaluation.
 """
@@ -15,6 +17,8 @@ import os
 import time
 
 import matplotlib
+
+from recognition.Siamese_ISIC_s4808950.predict import sample_split
 matplotlib.use("Agg")  # save plots to file without needing a display (e.g. on Rangpur)
 import matplotlib.pyplot as plt
 import torch
@@ -22,24 +26,44 @@ from sklearn.metrics import roc_auc_score
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
-from dataset import LesionDataset, build_transforms, get_splits
-from modules import BaselineClassifier, count_parameters
+from dataset import LesionDataset, PairDataset, build_transforms, get_splits
+from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_parameters
 
 OUT_DIR = "outputs"
 DATA_ROOT = "data"
 
+MODEL_CHOICE = "baseline"  # "baseline" or "siamese
+EPOCHS = 20
+BATCH_SIZE = 32
+LR = 1e-4
+WEIGHT_DECAY = 1e-4
+PATIENCE = 5  # early stopping: stop if val AUROC does not improve
+SUBSET = None  # for quick smoke tests, use a random subset of the training data
+NUM_WORKERS = 4  # for DataLoader
+SEED = 0  # for reproducibility
+
 def parse_args():
+    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, LR, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED
+
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
-    parser.add_argument("--model", choices=["baseline"], default="baseline")
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--subset", type=int, default=None)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--seed", type=int, default=0)
-    return parser.parse_args()
+    MODEL_CHOICE = parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
+    parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--lr", type=float, default=LR)
+    parser.add_argument("--weight_decay", type=float, default=WEIGHT_DECAY)
+    parser.add_argument("--patience", type=int, default=PATIENCE)
+    parser.add_argument("--subset", type=int, default=SUBSET)
+    parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
+    parser.add_argument("--seed", type=int, default=SEED)
+
+    args = parser.parse_args()
+    MODEL_CHOICE, EPOCHS, BATCH_SIZE, LR, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED = (
+        args.model, args.epochs, args.batch_size, args.lr, args.weight_decay,
+        args.patience, args.subset, args.num_workers, args.seed
+    )
+
+    return args
+
 
 
 def pick_device():
@@ -51,14 +75,13 @@ def pick_device():
     return torch.device("cpu")
 
 
-def random_subset(dataset, size, seed):
+def random_subset(dataset, size):
     """A reproducible random subset, for quick smoke tests."""
     if size is None or size >= len(dataset):
         return dataset
-    g = torch.Generator().manual_seed(seed)
+    g = torch.Generator().manual_seed(SEED)
     indices = torch.randperm(len(dataset), generator=g)[:size].tolist()
     return Subset(dataset, indices)
-
 
 def subset_targets(dataset):
     """Labels of a LesionDataset, or of a Subset of one."""
@@ -122,7 +145,7 @@ def plot_history(history, path):
     fig, (ax_loss, ax_auc) = plt.subplots(1, 2, figsize=(10, 4))
     ax_loss.plot(epochs, [h["train_loss"] for h in history], marker="o", label="train")
     ax_loss.plot(epochs, [h["val_loss"] for h in history], marker="o", label="validation")
-    ax_loss.set(xlabel="epoch", ylabel="weighted cross-entropy", title="Loss")
+    ax_loss.set(xlabel="epoch", ylabel="Loss", title="Loss")
     ax_loss.legend()
     ax_auc.plot(epochs, [h["val_auroc"] for h in history], marker="o", color="tab:green")
     ax_auc.set(xlabel="epoch", ylabel="AUROC", title="Validation AUROC", ylim=(0.5, 1.0))  # 0.5 = chance
@@ -132,36 +155,45 @@ def plot_history(history, path):
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
+def loader(dataset, shuffle):
+    """DataLoader with reproducible shuffling."""
+    g = torch.Generator().manual_seed(0)
+    return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=shuffle, num_workers=NUM_WORKERS, generator=g)
 
 def main():
     args = parse_args()
-    # set the random seed for reproducibility
-    torch.manual_seed(args.seed)
+    torch.manual_seed(SEED)
     device = pick_device()
     os.makedirs(OUT_DIR, exist_ok=True)
 
     # Data: train with augmentation, validate without. The test split is not loaded.
     df = get_splits(DATA_ROOT)
-    train_set = random_subset(LesionDataset(df, "train", build_transforms(train=True)), args.subset, args.seed)
-    val_set = random_subset(LesionDataset(df, "val"), args.subset and args.subset // 2, args.seed)
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    train_set = random_subset(LesionDataset(df, "train", build_transforms(train=True)), SUBSET, SEED)
+    val_set = random_subset(LesionDataset(df, "val"), SUBSET // 2, SEED)
+    train_loader = loader(train_set, True)
+    val_loader = loader(val_set, False)
 
-    model = BaselineClassifier(pretrained=True).to(device)
-    weights = class_weights(subset_targets(train_set))
-    loss_fn = nn.CrossEntropyLoss(weight=weights.to(device))
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if MODEL_CHOICE == "baseline":
+        train_loader = loader(train_set, True)
+        model = BaselineClassifier(pretrained=True).to(device)
+        weights = class_weights(torch.tensor(train_set["target"].values))
+        loss_fn = nn.CrossEntropyLoss(weight=weights.to(device))
+        loss_label = "weighted cross-entropy"
+        details = f"class weights {[round(w, 2) for w in weights.tolist()]}"
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
+          f"{details} | parameters {count_parameters(model):,}")
 
-    print(f"device {device} | train {len(train_set)} | val {len(val_set)} | "
-          f"class weights {[round(w, 2) for w in weights.tolist()]} | parameters {count_parameters(model):,}")
-
-    weights_path = os.path.join(OUT_DIR, f"{args.model}_best.pt")
+    weights_path = os.path.join(OUT_DIR, f"{MODEL_CHOICE}_best.pt")
     history, best_auroc, epochs_since_best = [], -1.0, 0
+
     start = time.time()
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(1, EPOCHS + 1):
         epoch_start = time.time()
-        train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer, device)
-        val = evaluate(model, val_loader, loss_fn, device)
+        if MODEL_CHOICE == "baseline":
+            train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer, device)
+            val = evaluate(model, val_loader, loss_fn, device)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
                         "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
                         "seconds": time.time() - epoch_start})
@@ -175,22 +207,24 @@ def main():
             torch.save(model.state_dict(), weights_path)
         else:
             epochs_since_best += 1
-            if epochs_since_best >= args.patience:
-                print(f"early stopping: no improvement for {args.patience} epochs")
+            if epochs_since_best >= PATIENCE:
+                print(f"early stopping: no improvement for {PATIENCE} epochs")
                 break
 
     summary = {
-        "model": args.model, "device": str(device), "args": vars(args),
+        "model": MODEL_CHOICE, "device": str(device), "args": vars(args),
         "best_val_auroc": best_auroc, "parameters": count_parameters(model),
         "total_minutes": (time.time() - start) / 60,
         "history": history,
     }
     # saving for logs and later analysis
-    with open(os.path.join(OUT_DIR, f"{args.model}_history.json"), "w") as f:
+    with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_history.json"), "w") as f:
         json.dump(summary, f, indent=2)
-    plot_history(history, os.path.join(OUT_DIR, f"{args.model}_curves.png"))
+    plot_history(history, os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"), loss_label)
 
-    print(f"best val AUROC {best_auroc:.4f} | weights -> {weights_path}")
+    print(f"best val AUROC {best_auroc:.4f} | weights -> {weights_path} | "
+          f"total {summary['total_minutes']:.1f} min | peak GPU memory "
+)
 
 
 if __name__ == "__main__":
