@@ -64,8 +64,6 @@ def parse_args():
 
     return args
 
-
-
 def pick_device():
     """Best available device: CUDA (Rangpur), MPS (Mac GPU), else CPU."""
     if torch.cuda.is_available():
@@ -75,6 +73,34 @@ def pick_device():
     return torch.device("cpu")
 
 
+class PeakMemory:
+    """
+    Tracks peak GPU memory during training, for the README's resource profiling table.
+
+    CUDA: PyTorch records the peak itself (torch.cuda.max_memory_allocated).
+    MPS (Apple GPU): there is no built-in peak, so update() is called after every
+    training batch and keeps the largest value of torch.mps.driver_allocated_memory().
+    """
+
+    def __init__(self, device):
+        self.device = device
+        self.peak_bytes = 0
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+
+    def update(self):
+        if self.device.type == "mps":
+            self.peak_bytes = max(self.peak_bytes, torch.mps.driver_allocated_memory())
+
+    def peak_gib(self):
+        """Peak memory in GiB, or None on CPU."""
+        if self.device.type == "cuda":
+            return torch.cuda.max_memory_allocated() / 2**30
+        if self.device.type == "mps":
+            return self.peak_bytes / 2**30
+        return None
+
+
 def random_subset(dataset, size):
     """A reproducible random subset, for quick smoke tests."""
     if size is None or size >= len(dataset):
@@ -82,13 +108,6 @@ def random_subset(dataset, size):
     g = torch.Generator().manual_seed(SEED)
     indices = torch.randperm(len(dataset), generator=g)[:size].tolist()
     return Subset(dataset, indices)
-
-def subset_targets(dataset):
-    """Labels of a LesionDataset, or of a Subset of one."""
-    if isinstance(dataset, Subset):
-        return dataset.dataset.targets[dataset.indices]
-    return dataset.targets
-
 
 def class_weights(targets):
     """
@@ -101,7 +120,7 @@ def class_weights(targets):
     return len(targets) / (2 * counts)
 
 
-def train_one_epoch(model, loader, loss_fn, optimizer, device):
+def train_one_epoch(model, loader, loss_fn, optimizer, device, memory):
     """One pass over the training data. Returns the mean training loss."""
     model.train()
     total_loss, n = 0.0, 0
@@ -111,6 +130,7 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device):
         loss = loss_fn(model(images), targets)
         loss.backward()
         optimizer.step()
+        memory.update()
         total_loss += loss.item() * len(targets)
         n += len(targets)
     return total_loss / n
@@ -180,19 +200,31 @@ def main():
         loss_fn = nn.CrossEntropyLoss(weight=weights.to(device))
         loss_label = "weighted cross-entropy"
         details = f"class weights {[round(w, 2) for w in weights.tolist()]}"
-    
+    else:
+        # Pair sampling balances the classes, so no class weights are needed.
+        train_pairs = PairDataset(train_set, "train", seed=SEED)
+        train_loader = loader(train_pairs, True)
+        # Fixed validation pairs (epoch never changes, no augmentation) so the val loss is comparable across epochs.
+        val_pair_loader = loader(PairDataset(val_set, "val", transform=build_transforms(train=False), seed=SEED), False)
+        # Reference bank: training images without augmentation, embedded each epoch for kNN.
+        bank_loader = loader(LesionDataset(train_set, "train"), False)
+        model = SiameseNet(pretrained=True).to(device)
+        loss_fn = ContrastiveLoss(margin=MARGIN, k=K).to(device)
+        loss_label = "contrastive loss"
+        details = f"pairs/epoch {len(train_pairs)} | margin {MARGIN} | k {K}"
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
           f"{details} | parameters {count_parameters(model):,}")
 
     weights_path = os.path.join(OUT_DIR, f"{MODEL_CHOICE}_best.pt")
     history, best_auroc, epochs_since_best = [], -1.0, 0
-
+    memory = PeakMemory(device)
     start = time.time()
     for epoch in range(1, EPOCHS + 1):
         epoch_start = time.time()
         if MODEL_CHOICE == "baseline":
-            train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer, device)
+            train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer, device, memory)
             val = evaluate(model, val_loader, loss_fn, device)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
                         "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
@@ -215,6 +247,7 @@ def main():
         "model": MODEL_CHOICE, "device": str(device), "args": vars(args),
         "best_val_auroc": best_auroc, "parameters": count_parameters(model),
         "total_minutes": (time.time() - start) / 60,
+        "peak_gpu_memory_gib": memory.peak_gib(),
         "history": history,
     }
     # saving for logs and later analysis
@@ -222,9 +255,10 @@ def main():
         json.dump(summary, f, indent=2)
     plot_history(history, os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"), loss_label)
 
+    peak = memory.peak_gib()
     print(f"best val AUROC {best_auroc:.4f} | weights -> {weights_path} | "
           f"total {summary['total_minutes']:.1f} min | peak GPU memory "
-)
+          f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device.type})'}")
 
 
 if __name__ == "__main__":
