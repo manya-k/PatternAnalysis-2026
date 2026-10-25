@@ -34,7 +34,6 @@ MODEL_CHOICE = "baseline"  # "baseline" or "siamese
 EPOCHS = 20
 BATCH_SIZE = 32
 LR = 1e-4
-WEIGHT_DECAY = 1e-4
 PATIENCE = 5  # early stopping: stop if val AUROC does not improve
 SUBSET = None  # for quick smoke tests, use a random subset of the training data
 NUM_WORKERS = 4  # for DataLoader
@@ -43,14 +42,12 @@ MARGIN = 1.0  # for contrastive loss
 K = 5  # for kNN classification of validation images
 
 def parse_args():
-    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, LR, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K
+    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K
 
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
     MODEL_CHOICE = parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--lr", type=float, default=LR)
-    parser.add_argument("--weight_decay", type=float, default=WEIGHT_DECAY)
     parser.add_argument("--patience", type=int, default=PATIENCE)
     parser.add_argument("--subset", type=int, default=SUBSET)
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
@@ -59,8 +56,8 @@ def parse_args():
     parser.add_argument("--k", type=int, default=K, help="k for kNN classification of validation images")
 
     args = parser.parse_args()
-    MODEL_CHOICE, EPOCHS, BATCH_SIZE, LR, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K = (
-        args.model, args.epochs, args.batch_size, args.lr, args.weight_decay,
+    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K = (
+        args.model, args.epochs, args.batch_size,
         args.patience, args.subset, args.num_workers, args.seed, args.margin, args.k
     )
 
@@ -165,6 +162,23 @@ def evaluate(model, loader, loss_fn, device):
         "accuracy": ((probs >= 0.5).long() == labels).float().mean().item(),
     }
 
+
+def train_one_epoch_siamese(model, loader, loss_fn, optimizer, device, memory):
+    """One pass over the training pairs. Returns the mean contrastive loss."""
+    model.train()
+    total_loss, n = 0.0, 0
+    for img_a, img_b, same in loader:
+        img_a, img_b, same = img_a.to(device), img_b.to(device), same.to(device)
+        optimizer.zero_grad()
+        emb_a, emb_b = model(img_a, img_b)
+        loss = loss_fn(emb_a, emb_b, same)
+        loss.backward()
+        optimizer.step()
+        memory.update()
+        total_loss += loss.item() * len(same)
+        n += len(same)
+    return total_loss / n
+
 def plot_history(history, path, loss_label):
     """Training/validation loss and validation AUROC per epoch."""
     epochs = [h["epoch"] for h in history]
@@ -217,7 +231,7 @@ def main():
         loss_label = "contrastive loss"
         details = f"pairs/epoch {len(train_pairs)} | margin {MARGIN} | k {K}"
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
           f"{details} | parameters {count_parameters(model):,}")
 
@@ -230,6 +244,9 @@ def main():
         if MODEL_CHOICE == "baseline":
             train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer, device, memory)
             val = evaluate(model, val_loader, loss_fn, device)
+        else:
+            train_pairs.set_epoch(epoch)  # fresh pairs every epoch
+            train_loss = train_one_epoch_siamese(model, train_loader, loss_fn, optimizer, device, memory)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
                         "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
                         "seconds": time.time() - epoch_start})
