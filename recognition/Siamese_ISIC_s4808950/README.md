@@ -19,7 +19,7 @@ The central question is: does the Siamese model's distance-based confidence trac
 - Binary classification (benign vs. melanoma) of single 224x224 dermoscopic images from the Kaggle ISIC dataset, using only the image and its label. Patient metadata such as age, sex and lesion site is not used as a model input.
 - A Siamese network (shared ResNet-18 encoder, contrastive loss) and a conventional CNN baseline, trained and evaluated on the same patient-grouped train/validation/test split.
 - Distance-based confidence, a reject (refer-to-specialist) rule chosen on validation data, and a calibration and uncertainty comparison against the baseline.
-- Profiling of computational cost (parameters, peak VRAM, inference latency), a failure-case autopsy of 3–5 errors, and a written deployment recommendation.
+- Profiling of computational cost (parameters, peak GPU memory, inference latency), a failure-case autopsy of 3–5 errors, and a written deployment recommendation.
 
 *Out of scope:*
 - Clinical validation or regulatory approval. Results are a research prototype on retrospective public data, not evidence of real-world diagnostic safety.
@@ -37,7 +37,7 @@ The central question is: does the Siamese model's distance-based confidence trac
 
 4. **Safe reject rule.** a confidence threshold will be chosen on validation data only, such that **melanoma recall among auto-decided cases is ≥ 0.95**. On test, report the achieved melanoma recall and the **referral rate**, with a provisional target of ≤ 50% of cases referred.
 
-5. **Resource constraint.** Peak training GPU memory is **≤ 8 GiB** at the chosen batch size with mixed precision. A full training run takes **≤ 4 GPU-hours** on Rangpur. Report per-image inference latency, including the k-nearest-neighbour search, together with the hardware and batch size. The provisional target is ≤ 50 ms per image.
+5. **Resource constraint.** All training and evaluation run on a single laptop GPU (Apple M5 Pro, PyTorch MPS backend). Peak training GPU memory is **≤ 8 GiB** at batch size 32, measured by sampling `torch.mps.driver_allocated_memory()` after every training batch. A full training run takes **≤ 2 hours** per model. Per-image inference latency, including the k-nearest-neighbour search for the Siamese model, is **≤ 50 ms**. Parameter count, peak memory and latency are reported for both models, together with the hardware and batch size.
 
 ### 2. Model Choice and Course Concepts
 
@@ -60,7 +60,7 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 
 ### 3. Preliminary Feasibility Evidence
 
-> **Status:** The data audit, split and baseline smoke test have been run. The Siamese smoke test and the peak-GPU-memory measurement (which needs CUDA on Rangpur) are still to come.
+> **Status:** The data audit, the split, smoke tests of both models, peak-memory measurements and one full baseline training run have been completed. All results below are on the validation split; the test split has not been used.
 
 | Check | Result |
 |---|---|
@@ -79,6 +79,9 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 | Baseline model | Pretrained ResNet-18 + `Linear(512→2)`: 11,177,538 trainable parameters |
 | Siamese model | Same pretrained ResNet-18 + projection head (512→256→128, L2-normalised): 11,340,736 trainable parameters (+1.5%); output shapes, unit-length embeddings, weight sharing and contrastive-loss values checked on synthetic inputs |
 | Baseline smoke test (1,000 train / 500 val images, 2 epochs, batch 32, Apple M5 Pro GPU via MPS) | runs end to end; val AUROC 0.873 → 0.874, val loss 0.523 → 0.437; about 40 s per epoch; total 1.3 min. Pipeline check only, not a performance result |
+| Siamese smoke test (1,000 train pairs / 500 val images, 2 epochs, batch 32, k = 10, margin 1.0, same hardware) | runs end to end; contrastive loss 0.242 → 0.226 (train), 0.226 → 0.216 (val); kNN val AUROC 0.865 → 0.852; about 47 s per epoch, including embedding the reference bank. Pipeline check only |
+| Peak training GPU memory (batch 32, MPS, sampled after every batch) | baseline **1.19 GiB**; Siamese **2.20 GiB** (≈1.8×, since each training item is a pair of images). Both well under the 8 GiB limit |
+| Baseline full training run (17,253 train / 3,687 val images, lr 1e-4, batch 32, patience 5) | best **val AUROC 0.927** at epoch 4 (val accuracy 0.851); early-stopped after 9 epochs; about 110 s per epoch; 17.1 min in total. Train loss kept falling (0.452 → 0.318) while val loss rose after epoch 4, so early stopping on val AUROC is needed |
 
 ### 4. Risks, Budget and Fallback
 
@@ -89,15 +92,16 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 
 
 **Computing budget.**
-- One smoke test for each model.
-- About 3 full training runs per model, each ≤ 4 GPU-hours with early stopping (patience of 5 epochs).
+- Hardware: one Apple M5 Pro laptop GPU (MPS). Neither model needs the Rangpur cluster: the full baseline run took 17 minutes, and the Siamese model is expected to take roughly 3× as long per epoch.
+- One smoke test for each model (done).
+- About 3 full training runs per model, each ≤ 2 hours with early stopping (patience 3–5 epochs).
 - One final evaluation on the test set.
-- Total ≤ 25 GPU-hours on Rangpur.
+- Total ≤ 12 hours of laptop GPU time.
 
 
 **Fallback.**
 - If the Siamese model stays clearly below 0.80 accuracy or AUROC: freeze the early ResNet stages, switch to triplet loss with hard-negative mining, or train a linear head on the frozen Siamese embeddings.
-- If memory or runtime limits are exceeded: reduce the batch size, use gradient accumulation and AMP, or freeze the backbone.
+- If memory or runtime limits are exceeded: reduce the batch size or the number of pairs per epoch, use gradient accumulation, freeze the early backbone layers, or move training to the Rangpur cluster.
 
 The split, the metrics and the reject-rule protocol stay fixed throughout, so any fallback can still answer the dilemma. A negative result, such as the Siamese confidence being *no better* than the calibrated baseline, is still a valid, evidence-based recommendation.
 
@@ -111,3 +115,6 @@ The split, the metrics and the reject-rule protocol stay fixed throughout, so an
 [6] V. Rotemberg *et al.*, "A patient-centric dataset of images and metadata for identifying melanomas using clinical context," *Scientific Data*, vol. 8, 2021.  
 [7] Kaggle, "ISIC Melanoma Dataset (resized to 224x224)," roua91. CC BY-NC 4.0.
 [8] H. Sulakhe, "siamesenetworks-pytorch: loss.py," GitHub repository. [Online]. Available: https://github.com/HarshSulakhe/siamesenetworks-pytorch/blob/master/loss.py (accessed Oct. 21, 2026).
+
+## AI Declaration:
+1. AI was used to add print statements to test and demonstrate that models are working as intentded before training and evaluation is completed. I did not know how I could check this with mock data so I turned to AI and it explained and help me add the prints at the end of `modules.py`

@@ -112,12 +112,9 @@ class ContrastiveLoss(nn.Module):
     different-class pairs are pushed apart until they are at least `margin` apart, after
     which they no longer contribute.
 
-
     Implementation inspired by H. Sulakhe, siamesenetworks-pytorch, loss.py:
     https://github.com/HarshSulakhe/siamesenetworks-pytorch/blob/master/loss.py
-
     """
-
     def __init__(self, margin=1.0):
         super().__init__()
         self.margin = margin
@@ -152,4 +149,20 @@ if __name__ == "__main__":
     other_images = torch.randn(4, 3, 224, 224)
     with torch.no_grad():
         emb_a, emb_b = siamese(images, other_images)
+
+    # the below checks are added to demonstrate that the network functions as intended.
     print(f"\nSiameseNet: pair of {tuple(images.shape)} -> embeddings {tuple(emb_a.shape)}, {tuple(emb_b.shape)}")
+    print(f"embeddings have length 1: {torch.allclose(emb_a.norm(dim=1), torch.ones(4), atol=1e-5)}")
+    print(f"shared weights (embed == forward): {torch.allclose(siamese.embed(images), emb_a, atol=1e-5)}")
+    print(f"trainable parameters: {count_parameters(siamese):,}")
+
+    # Contrastive loss on hand-made embeddings, where the right answer is known.
+    loss_fn = ContrastiveLoss(margin=1.0)
+    x = F.normalize(torch.tensor([[1.0, 0.0]]), dim=1)
+    y = F.normalize(torch.tensor([[0.0, 1.0]]), dim=1)  # distance sqrt(2) from x
+    same, different = torch.ones(1), torch.zeros(1)
+    print(f"\nContrastiveLoss (margin 1.0):")
+    print(f"  identical, same class       -> {loss_fn(x, x, same).item():.3f}  (expect 0: already together)")
+    print(f"  far apart, same class       -> {loss_fn(x, y, same).item():.3f}  (expect 2.0 = d^2: pull together)")
+    print(f"  far apart, different class  -> {loss_fn(x, y, different).item():.3f}  (expect 0: beyond the margin)")
+    print(f"  identical, different class  -> {loss_fn(x, x, different).item():.3f}  (expect 1.0 = margin^2: push apart)")
