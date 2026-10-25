@@ -17,14 +17,12 @@ import os
 import time
 
 import matplotlib
-
-from recognition.Siamese_ISIC_s4808950.predict import sample_split
 matplotlib.use("Agg")  # save plots to file without needing a display (e.g. on Rangpur)
 import matplotlib.pyplot as plt
 import torch
 from sklearn.metrics import roc_auc_score
 from torch import nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from dataset import LesionDataset, PairDataset, build_transforms, get_splits
 from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_parameters
@@ -41,9 +39,11 @@ PATIENCE = 5  # early stopping: stop if val AUROC does not improve
 SUBSET = None  # for quick smoke tests, use a random subset of the training data
 NUM_WORKERS = 4  # for DataLoader
 SEED = 0  # for reproducibility
+MARGIN = 1.0  # for contrastive loss
+K = 5  # for kNN classification of validation images
 
 def parse_args():
-    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, LR, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED
+    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, LR, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K
 
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
     MODEL_CHOICE = parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
@@ -55,11 +55,13 @@ def parse_args():
     parser.add_argument("--subset", type=int, default=SUBSET)
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--margin", type=float, default=MARGIN, help="contrastive loss margin")
+    parser.add_argument("--k", type=int, default=K, help="k for kNN classification of validation images")
 
     args = parser.parse_args()
-    MODEL_CHOICE, EPOCHS, BATCH_SIZE, LR, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED = (
+    MODEL_CHOICE, EPOCHS, BATCH_SIZE, LR, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K = (
         args.model, args.epochs, args.batch_size, args.lr, args.weight_decay,
-        args.patience, args.subset, args.num_workers, args.seed
+        args.patience, args.subset, args.num_workers, args.seed, args.margin, args.k
     )
 
     return args
@@ -101,13 +103,18 @@ class PeakMemory:
         return None
 
 
-def random_subset(dataset, size):
-    """A reproducible random subset, for quick smoke tests."""
-    if size is None or size >= len(dataset):
-        return dataset
-    g = torch.Generator().manual_seed(SEED)
-    indices = torch.randperm(len(dataset), generator=g)[:size].tolist()
-    return Subset(dataset, indices)
+def sample_split(df, split, size, seed):
+    """
+    The rows of one split, or a reproducible random sample of `size` of them.
+
+    Sampling the table (rather than a Dataset) lets every dataset built from it, single
+    images, pairs and the kNN reference bank, share the same smaller set for smoke tests.
+    """
+    rows = df[df["split"] == split]
+    if size is None or size >= len(rows):
+        return rows
+    return rows.sample(n=size, random_state=seed)
+
 
 def class_weights(targets):
     """
@@ -158,8 +165,7 @@ def evaluate(model, loader, loss_fn, device):
         "accuracy": ((probs >= 0.5).long() == labels).float().mean().item(),
     }
 
-
-def plot_history(history, path):
+def plot_history(history, path, loss_label):
     """Training/validation loss and validation AUROC per epoch."""
     epochs = [h["epoch"] for h in history]
     fig, (ax_loss, ax_auc) = plt.subplots(1, 2, figsize=(10, 4))
@@ -175,10 +181,8 @@ def plot_history(history, path):
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
-def loader(dataset, shuffle):
-    """DataLoader with reproducible shuffling."""
-    g = torch.Generator().manual_seed(0)
-    return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=shuffle, num_workers=NUM_WORKERS, generator=g)
+def loader(dataset, shuffle=False):
+    return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=shuffle, num_workers=NUM_WORKERS)
 
 def main():
     args = parse_args()
@@ -186,15 +190,14 @@ def main():
     device = pick_device()
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # Data: train with augmentation, validate without. The test split is not loaded.
+    # splitting the data to train with augmentation, validate without.
     df = get_splits(DATA_ROOT)
-    train_set = random_subset(LesionDataset(df, "train", build_transforms(train=True)), SUBSET, SEED)
-    val_set = random_subset(LesionDataset(df, "val"), SUBSET // 2, SEED)
-    train_loader = loader(train_set, True)
-    val_loader = loader(val_set, False)
+    train_set = sample_split(df, "train", SUBSET, SEED)
+    val_set = sample_split(df, "val", SUBSET and SUBSET // 2, SEED)
+    val_loader = loader(LesionDataset(val_set, "val"))
 
     if MODEL_CHOICE == "baseline":
-        train_loader = loader(train_set, True)
+        train_loader = loader(LesionDataset(train_set, "train", build_transforms(train=True)), shuffle=True)
         model = BaselineClassifier(pretrained=True).to(device)
         weights = class_weights(torch.tensor(train_set["target"].values))
         loss_fn = nn.CrossEntropyLoss(weight=weights.to(device))
@@ -203,13 +206,14 @@ def main():
     else:
         # Pair sampling balances the classes, so no class weights are needed.
         train_pairs = PairDataset(train_set, "train", seed=SEED)
-        train_loader = loader(train_pairs, True)
-        # Fixed validation pairs (epoch never changes, no augmentation) so the val loss is comparable across epochs.
-        val_pair_loader = loader(PairDataset(val_set, "val", transform=build_transforms(train=False), seed=SEED), False)
+        train_loader = loader(train_pairs, shuffle=True)
+        # need another loader for the validation pairs, so the contrastive loss can be computed for the curves.
+        val_pair_loader = loader(PairDataset(val_set, "val", transform=build_transforms(train=False), seed=SEED))
+        
         # Reference bank: training images without augmentation, embedded each epoch for kNN.
-        bank_loader = loader(LesionDataset(train_set, "train"), False)
+        bank_loader = loader(LesionDataset(train_set, "train"))
         model = SiameseNet(pretrained=True).to(device)
-        loss_fn = ContrastiveLoss(margin=MARGIN, k=K).to(device)
+        loss_fn = ContrastiveLoss(margin=MARGIN, K=K)
         loss_label = "contrastive loss"
         details = f"pairs/epoch {len(train_pairs)} | margin {MARGIN} | k {K}"
 
