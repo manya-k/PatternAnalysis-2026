@@ -124,22 +124,41 @@ class PairDataset(Dataset):
     """
 
     def __init__(self, df, split, pairs_per_epoch=None, transform=None, seed=0):
-        self.images = LesionDataset(df, split, transform or build_transforms(train=True))
-        targets = self.images.targets
-        self.by_class = {c: torch.nonzero(targets == c).flatten() for c in (0, 1)}
-        self.pairs_per_epoch = pairs_per_epoch or len(self.images)
+        # Training pairs are augmented by default.
+        if transform is None:
+            transform = build_transforms(train=True)
+
+        # The single images of this split; every pair is built from two of these.
+        self.images = LesionDataset(df, split, transform)
+
+        # Row numbers of the benign (0) and melanoma (1) images, so we can pick a
+        # random image of a chosen class.
+        labels = self.images.targets
+        self.rows_by_class = {
+            0: torch.where(labels == 0)[0],
+            1: torch.where(labels == 1)[0],
+        }
+
+        # By default, one pair per image in the split each epoch.
+        if pairs_per_epoch is None:
+            pairs_per_epoch = len(self.images)
+        self.pairs_per_epoch = pairs_per_epoch
+
         self.seed = seed
         self.epoch = 0
 
     def set_epoch(self, epoch):
+        """Change the epoch so that the next pass draws a fresh set of pairs."""
         self.epoch = epoch
 
     def __len__(self):
         return self.pairs_per_epoch
 
-    def _sample(self, cls, g):
-        pool = self.by_class[cls]
-        return int(pool[torch.randint(len(pool), (1,), generator=g)])
+    def _random_row(self, cls, g):
+        """A random row number of an image with class `cls`, using generator `g`."""
+        rows = self.rows_by_class[cls]
+        pick = torch.randint(len(rows), (1,), generator=g)
+        return int(rows[pick])
 
     def __getitem__(self, i):
         # Seeding per item (not per worker) keeps pairs identical across num_workers settings.
@@ -148,10 +167,10 @@ class PairDataset(Dataset):
         same = bool(torch.randint(2, (1,), generator=g))
         partner_cls = anchor_cls if same else 1 - anchor_cls
 
-        a = self._sample(anchor_cls, g)
-        b = self._sample(partner_cls, g)
+        a = self._random_row(anchor_cls, g)
+        b = self._random_row(partner_cls, g)
         while same and b == a:  # never pair an image with itself
-            b = self._sample(partner_cls, g)
+            b = self._random_row(partner_cls, g)
 
         image_a, _, _ = self.images[a]
         image_b, _, _ = self.images[b]
