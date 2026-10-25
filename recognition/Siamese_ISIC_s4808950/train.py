@@ -3,7 +3,8 @@ Train and validate the models, saving the best weights and the training curves.
 
   --model baseline: ResNet-18 classifier trained with class-weighted cross-entropy.
   --model siamese:  Siamese network trained on image pairs with contrastive loss,
-  validated by kNN against the embedded training images.
+                    validated by k-nearest-neighbour classification against the
+                    embedded training images.
 
 Usage example:
     python train.py --model baseline --subset 1000 --epochs 1
@@ -236,7 +237,7 @@ def plot_history(history, path, loss_label):
     fig, (ax_loss, ax_auc) = plt.subplots(1, 2, figsize=(10, 4))
     ax_loss.plot(epochs, [h["train_loss"] for h in history], marker="o", label="train")
     ax_loss.plot(epochs, [h["val_loss"] for h in history], marker="o", label="validation")
-    ax_loss.set(xlabel="epoch", ylabel="Loss", title="Loss")
+    ax_loss.set(xlabel="epoch", ylabel=loss_label, title="Loss")
     ax_loss.legend()
     ax_auc.plot(epochs, [h["val_auroc"] for h in history], marker="o", color="tab:green")
     ax_auc.set(xlabel="epoch", ylabel="AUROC", title="Validation AUROC", ylim=(0.5, 1.0))  # 0.5 = chance
@@ -318,7 +319,7 @@ def main():
                 break
 
     summary = {
-        "model": MODEL_CHOICE, "device": str(device), "args": vars(args),
+        "model": MODEL_CHOICE, "device": str(device), "args": vars(args), "lr": LR,
         "best_val_auroc": best_auroc, "parameters": count_parameters(model),
         "total_minutes": (time.time() - start) / 60,
         "peak_gpu_memory_gib": memory.peak_gib(),

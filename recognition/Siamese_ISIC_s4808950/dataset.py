@@ -163,6 +163,8 @@ class PairDataset(Dataset):
     def __getitem__(self, i):
         # Seeding per item (not per worker) keeps pairs identical across num_workers settings.
         g = torch.Generator().manual_seed(self.seed * 1_000_003 + self.epoch * 10_000_019 + i)
+        # choose the class first, then whether the partner is the same class or not, then pick two images.
+        # to enhance the learning
         anchor_cls = int(torch.randint(2, (1,), generator=g))
         same = bool(torch.randint(2, (1,), generator=g))
         partner_cls = anchor_cls if same else 1 - anchor_cls
