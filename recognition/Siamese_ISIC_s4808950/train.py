@@ -3,6 +3,7 @@ Train and validate the models, saving the best weights and the training curves.
 
   --model baseline: ResNet-18 classifier trained with class-weighted cross-entropy.
   --model siamese:  Siamese network trained on image pairs with contrastive loss,
+  validated by kNN against the embedded training images.
 
 Usage example:
     python train.py --model baseline --subset 1000 --epochs 1
@@ -30,7 +31,7 @@ from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_param
 OUT_DIR = "outputs"
 DATA_ROOT = "data"
 
-MODEL_CHOICE = "baseline"  # "baseline" or "siamese
+MODEL_CHOICE = "baseline"  # "baseline" or "siamese"
 EPOCHS = 20
 BATCH_SIZE = 32
 LR = 1e-4
@@ -42,10 +43,10 @@ MARGIN = 1.0  # for contrastive loss
 K = 5  # for kNN classification of validation images
 
 def parse_args():
-    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, WEIGHT_DECAY, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K
+    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K
 
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
-    MODEL_CHOICE = parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
+    parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     parser.add_argument("--patience", type=int, default=PATIENCE)
@@ -189,6 +190,21 @@ def embed_all(model, loader, device):
         labels.append(targets)
     return torch.cat(embeddings), torch.cat(labels)
 
+
+def knn_melanoma_probability(query, bank, bank_labels, k):
+    """
+    Distance-weighted kNN: for each query embedding, the weighted share of its k nearest
+    reference embeddings that are melanoma. Closer neighbours count more (weight 1/d).
+
+    Returns a score in [0, 1] per query, used like the baseline's softmax probability.
+    """
+    distances = torch.cdist(query, bank)                         # [Q, N]
+    nearest_d, nearest_i = distances.topk(k, dim=1, largest=False)
+    weights = 1.0 / (nearest_d + 1e-6)
+    is_melanoma = bank_labels[nearest_i].float()                 # [Q, k]
+    return (weights * is_melanoma).sum(dim=1) / weights.sum(dim=1)
+
+
 @torch.no_grad()
 def evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, device, k):
     """
@@ -203,6 +219,16 @@ def evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, d
         img_a, img_b, same = img_a.to(device), img_b.to(device), same.to(device)
         total_loss += loss_fn(*model(img_a, img_b), same).item() * len(same)
         n += len(same)
+
+    bank, bank_labels = embed_all(model, bank_loader, device)
+    query, labels = embed_all(model, val_loader, device)
+    probs = knn_melanoma_probability(query, bank, bank_labels, k)
+    return {
+        "loss": total_loss / n,
+        "auroc": roc_auc_score(labels, probs),
+        "accuracy": ((probs >= 0.5).long() == labels).float().mean().item(),
+    }
+
 
 def plot_history(history, path, loss_label):
     """Training/validation loss and validation AUROC per epoch."""
@@ -252,7 +278,7 @@ def main():
         # Reference bank: training images without augmentation, embedded each epoch for kNN.
         bank_loader = loader(LesionDataset(train_set, "train"))
         model = SiameseNet(pretrained=True).to(device)
-        loss_fn = ContrastiveLoss(margin=MARGIN, K=K)
+        loss_fn = ContrastiveLoss(margin=MARGIN)
         loss_label = "contrastive loss"
         details = f"pairs/epoch {len(train_pairs)} | margin {MARGIN} | k {K}"
 
