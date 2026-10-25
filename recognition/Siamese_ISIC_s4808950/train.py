@@ -179,6 +179,31 @@ def train_one_epoch_siamese(model, loader, loss_fn, optimizer, device, memory):
         n += len(same)
     return total_loss / n
 
+@torch.no_grad()
+def embed_all(model, loader, device):
+    """Embed every image in a LesionDataset loader. Returns (embeddings [N, 128], labels [N])."""
+    model.eval()
+    embeddings, labels = [], []
+    for images, targets, _ in loader:
+        embeddings.append(model.embed(images.to(device)).cpu())
+        labels.append(targets)
+    return torch.cat(embeddings), torch.cat(labels)
+
+@torch.no_grad()
+def evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, device, k):
+    """
+    Validate the Siamese model the way it will be used: embed the training images as a
+    reference bank, classify validation images by kNN, and compute AUROC/accuracy.
+
+    The loss is the contrastive loss on a fixed set of validation pairs, for the curves.
+    """
+    model.eval()
+    total_loss, n = 0.0, 0
+    for img_a, img_b, same in val_pair_loader:
+        img_a, img_b, same = img_a.to(device), img_b.to(device), same.to(device)
+        total_loss += loss_fn(*model(img_a, img_b), same).item() * len(same)
+        n += len(same)
+
 def plot_history(history, path, loss_label):
     """Training/validation loss and validation AUROC per epoch."""
     epochs = [h["epoch"] for h in history]
@@ -239,6 +264,7 @@ def main():
     history, best_auroc, epochs_since_best = [], -1.0, 0
     memory = PeakMemory(device)
     start = time.time()
+
     for epoch in range(1, EPOCHS + 1):
         epoch_start = time.time()
         if MODEL_CHOICE == "baseline":
@@ -247,6 +273,7 @@ def main():
         else:
             train_pairs.set_epoch(epoch)  # fresh pairs every epoch
             train_loss = train_one_epoch_siamese(model, train_loader, loss_fn, optimizer, device, memory)
+            val = evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, device, K)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
                         "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
                         "seconds": time.time() - epoch_start})
