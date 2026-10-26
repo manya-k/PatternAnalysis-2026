@@ -7,8 +7,8 @@ Train and validate the models, saving the best weights and the training curves.
                     embedded training images.
 
 Usage example:
-    python train.py --model baseline --subset 1000 --epochs 1
-    python train.py --model siamese  --subset 1000 --epochs 1
+    python train.py --model baseline
+    python train.py --model siamese
 """
 
 import argparse
@@ -40,9 +40,6 @@ NUM_WORKERS = 4  # for DataLoader
 SEED = 0  # for reproducibility
 MARGIN = 1.0  # for contrastive loss
 K = 5  # for kNN classification of validation images
-LOSS_LABEL = "weighted cross-entropy" if MODEL_CHOICE == "baseline" else "contrastive loss"
-
-
 
 def parse_args():
     global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, K
@@ -239,8 +236,8 @@ def plot_history(history, path):
     ax_loss.plot(epochs, [h["train_loss"] for h in history], marker="o", label="train")
     ax_loss.plot(epochs, [h["val_loss"] for h in history], marker="o", label="validation")
 
-
-    ax_loss.set(xlabel="epoch", ylabel=LOSS_LABEL, title="Loss")
+    loss_label = "weighted cross-entropy" if MODEL_CHOICE == "baseline" else "Contrastive Loss"
+    ax_loss.set(xlabel="epoch", ylabel=loss_label, title="Loss")
     ax_loss.legend()
     ax_auc.plot(epochs, [h["val_auroc"] for h in history], marker="o", color="tab:green")
     ax_auc.set(xlabel="epoch", ylabel="AUROC", title="Validation AUROC", ylim=(0.5, 1.0))  # 0.5 = chance
@@ -279,26 +276,11 @@ def setup_siamese(train_set, val_set, device):
     }
 
 
-def run_epoch(setup, epoch, optimizer, val_loader, device, memory):
-    """Train for one epoch, then validate. Returns (train loss, validation results)."""
-    model = setup["model"]
-    loss_fn = setup["loss_fn"]
-
-    if MODEL_CHOICE == "baseline":
-        train_loss = train_one_epoch(model, setup["train_loader"], loss_fn, optimizer, device, memory)
-        return train_loss, evaluate(model, val_loader, loss_fn, device)
-    
-    setup["train_pairs"].set_epoch(epoch)  # fresh pairs every epoch
-    train_loss = train_one_epoch_siamese(model, setup["train_loader"], loss_fn, optimizer, device, memory)
-    val = evaluate_siamese(model, setup["bank_loader"], val_loader, setup["val_pair_loader"], loss_fn, device, K)
-    return train_loss, val
-
-
 def save_training_summary(summary, weights_path):
     """Save the history (for logs and the README), plot the curves and print a summary line."""
     with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_history.json"), "w") as f:
         json.dump(summary, f, indent=2)
-    plot_history(summary["history"], os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"), LOSS_LABEL)
+    plot_history(summary["history"], os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"))
     peak, device = summary["peak_gpu_memory_gib"], summary["device"]
     print(f"best val AUROC {summary['best_val_auroc']:.4f} | "
           f"total {summary['total_minutes']:.1f} min | peak GPU memory "
@@ -310,10 +292,11 @@ def train_epochs(setup, optimizer, val_loader, device):
     start = time.time()
     memory = PeakMemory(device)
     best_auroc, epochs_since_best = -1.0, 0
+    model = setup["model"]
+    loss_fn = setup["loss_fn"]
+
     for epoch in range(1, EPOCHS + 1):
         epoch_start = time.time()
-        model = setup["model"]
-        loss_fn = setup["loss_fn"]
 
         if MODEL_CHOICE == "baseline":
             train_loss = train_one_epoch(model, setup["train_loader"], loss_fn, optimizer, device, memory)
@@ -337,6 +320,7 @@ def train_epochs(setup, optimizer, val_loader, device):
             epochs_since_best += 1
             if epochs_since_best >= PATIENCE:
                 print(f"early stopping: no improvement for {PATIENCE} epochs")
+                break
     
     save_training_summary({
         "model": MODEL_CHOICE, "device": str(device), "lr": LR, "best_val_auroc": best_auroc,
@@ -346,7 +330,6 @@ def train_epochs(setup, optimizer, val_loader, device):
     
 
 def main():
-    args = parse_args()
     torch.manual_seed(SEED)
     device = pick_device()
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -359,7 +342,6 @@ def main():
     test_loader = loader(LesionDataset(test_set, "test"))
     val_loader = loader(LesionDataset(val_set, "val"))
 
-    setup = {}
     if MODEL_CHOICE == "baseline":
         setup = setup_baseline(train_set, device)
     else:
@@ -394,7 +376,7 @@ def baseline_logits(model, data_loader, device):
     """Raw 2-class logits and labels for every image in a loader."""
     logits, labels = [], []
     for images, targets, _ in data_loader:
-        logits.append(model(images.to(device))).cpu()
+        logits.append(model(images.to(device)).cpu())
         labels.append(targets)
     return torch.cat(logits), torch.cat(labels)
 
@@ -407,17 +389,17 @@ def handle_baseline_eval(model, val_loader, result, device):
     
     # bc baseline produces logits, the temperature needs to be adjusted
     temperature = fit_temperature(val_logits, val_labels)
-    val_probs = (val_logits / temperature).softmax(dim=1)[:, 1]
+    val_probs = melanoma_probability_from_logits(val_logits, temperature)
 
     result["temperature"] = temperature
-    return val_logits, val_labels, result
+    return val_probs, val_labels, result
 
 def handle_siamese_eval(model, val_loader, result, device, dfT):      
     bank, bank_labels = embed_all(model, loader(LesionDataset(dfT, "train")), device)
     val_embeddings, val_labels = embed_all(model, val_loader, device)
     
-    test_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, K)
-    return test_probs, val_labels, result
+    val_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, K)
+    return val_probs, val_labels, result
 
 
 def tune_model(model, device, train_df, val_loader):
@@ -431,7 +413,7 @@ def tune_model(model, device, train_df, val_loader):
                     model, val_loader, result, device, train_df
                 )
     result["scoring_seconds"] = time.time() - start
-    labels, probs = val_labels.numpy(), val_labels.numpy()
+    labels, probs = val_labels.numpy(), val_probs.numpy()
 
     # checking if confidence track correctness
     confidence, correct = confidence_and_correct(labels, probs)
