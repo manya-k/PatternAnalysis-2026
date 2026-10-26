@@ -40,6 +40,7 @@ NUM_WORKERS = 4  # for DataLoader
 SEED = 0  # for reproducibility
 MARGIN = 1.0  # for contrastive loss
 K = 5  # for kNN classification of validation images
+LOSS_LABEL = "weighted cross-entropy" if MODEL_CHOICE == "baseline" else "contrastive loss"
 
 
 
@@ -238,8 +239,8 @@ def plot_history(history, path):
     ax_loss.plot(epochs, [h["train_loss"] for h in history], marker="o", label="train")
     ax_loss.plot(epochs, [h["val_loss"] for h in history], marker="o", label="validation")
 
-    loss_label = "weighted cross-entropy" if MODEL_CHOICE == "baseline" else "contrastive loss"
-    ax_loss.set(xlabel="epoch", ylabel=loss_label, title="Loss")
+
+    ax_loss.set(xlabel="epoch", ylabel=LOSS_LABEL, title="Loss")
     ax_loss.legend()
     ax_auc.plot(epochs, [h["val_auroc"] for h in history], marker="o", color="tab:green")
     ax_auc.set(xlabel="epoch", ylabel="AUROC", title="Validation AUROC", ylim=(0.5, 1.0))  # 0.5 = chance
@@ -293,17 +294,17 @@ def run_epoch(setup, epoch, optimizer, val_loader, device, memory):
     return train_loss, val
 
 
-def save_training_summary(summary, loss_label, weights_path):
+def save_training_summary(summary, weights_path):
     """Save the history (for logs and the README), plot the curves and print a summary line."""
     with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_history.json"), "w") as f:
         json.dump(summary, f, indent=2)
-    plot_history(summary["history"], os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"), loss_label)
+    plot_history(summary["history"], os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"), LOSS_LABEL)
     peak, device = summary["peak_gpu_memory_gib"], summary["device"]
-    print(f"best val AUROC {summary['best_val_auroc']:.4f} | weights -> {weights_path} | "
+    print(f"best val AUROC {summary['best_val_auroc']:.4f} | "
           f"total {summary['total_minutes']:.1f} min | peak GPU memory "
           f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device})'}")
 
-def train_epochs(setup, optimizer, val_loader, device, memory):
+def train_epochs(setup, optimizer, val_loader, device):
     history = []
     weights_path = os.path.join(OUT_DIR, f"{MODEL_CHOICE}_best.pt")
     start = time.time()
@@ -323,8 +324,9 @@ def train_epochs(setup, optimizer, val_loader, device, memory):
             val = evaluate_siamese(model, setup["bank_loader"], val_loader, setup["val_pair_loader"], loss_fn, device, K)
         
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
-                    "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
+                    "val_auroc": val["auroc"], "val_accuracy": val["accuracy"], "k": K,
                     "seconds": time.time() - epoch_start})
+        
         print(f"epoch {epoch} | train loss {train_loss:.4f} | val loss {val['loss']:.4f} | "
             f"val AUROC {val['auroc']:.4f} | val acc {val['accuracy']:.4f} | {history[-1]['seconds']:.0f}s")
             
@@ -340,7 +342,7 @@ def train_epochs(setup, optimizer, val_loader, device, memory):
         "model": MODEL_CHOICE, "device": str(device), "lr": LR, "best_val_auroc": best_auroc,
         "parameters": count_parameters(model), "total_minutes": (time.time() - start) / 60, 
         "peak_gpu_memory_gib": memory.peak_gib(), "history": history,
-    }, setup["loss_label"], weights_path)
+    }, weights_path)
     
 
 def main():
@@ -392,7 +394,7 @@ def baseline_logits(model, data_loader, device):
     """Raw 2-class logits and labels for every image in a loader."""
     logits, labels = [], []
     for images, targets, _ in data_loader:
-        logits.append(model(images.to(device)))
+        logits.append(model(images.to(device))).cpu()
         labels.append(targets)
     return torch.cat(logits), torch.cat(labels)
 
@@ -423,8 +425,7 @@ def tune_model(model, device, train_df, val_loader):
     start = time.time()
     if MODEL_CHOICE == "baseline":
         val_probs, val_labels, result = handle_baseline_eval(
-            model, val_loader, val_loader, result, device
-        )
+            model, val_loader, result, device)
     else:
         val_probs, val_labels, result = handle_siamese_eval(
                     model, val_loader, result, device, train_df
