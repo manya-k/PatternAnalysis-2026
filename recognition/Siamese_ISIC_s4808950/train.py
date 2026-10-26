@@ -369,7 +369,7 @@ def main():
           f"{setup['details']} | parameters {count_parameters(model):,}")
     
     train_epochs(setup, optimizer, val_loader, device)
-    tune_model(setup["model"], device, train_set, val_loader, test_loader)
+    tune_model(setup["model"], device, train_set, val_loader)
 
 
 def closure(optimizer, logits, log_t, labels):
@@ -396,38 +396,41 @@ def baseline_logits(model, data_loader, device):
         labels.append(targets)
     return torch.cat(logits), torch.cat(labels)
 
-def handle_baseline_eval(model, val_loader, test_loader, result, device):
+def melanoma_probability_from_logits(logits, temperature=1.0):
+    return (logits / temperature).softmax(dim=1)[:, 1]
+
+
+def handle_baseline_eval(model, val_loader, result, device):
     val_logits, val_labels = baseline_logits(model, val_loader, device)
-    test_logits, test_labels = baseline_logits(model, test_loader, device)
     
     # bc baseline produces logits, the temperature needs to be adjusted
     temperature = fit_temperature(val_logits, val_labels)
-    test_probs = (test_logits / temperature).softmax(dim=1)[:, 1]
+    val_probs = (val_logits / temperature).softmax(dim=1)[:, 1]
 
     result["temperature"] = temperature
-    return test_probs, test_labels, result
+    return val_logits, val_labels, result
 
-def handle_siamese_eval(model, test_loader, result, device, dfT):      
+def handle_siamese_eval(model, val_loader, result, device, dfT):      
     bank, bank_labels = embed_all(model, loader(LesionDataset(dfT, "train")), device)
-    test_embeddings, test_labels = embed_all(model, test_loader, device)
+    val_embeddings, val_labels = embed_all(model, val_loader, device)
     
-    test_probs = knn_melanoma_probability(test_embeddings, bank, bank_labels, K)
-    return test_probs, test_labels, result
+    test_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, K)
+    return test_probs, val_labels, result
 
 
-def tune_model(model, device, train_df, val_loader, test_loader):
+def tune_model(model, device, train_df, val_loader):
     result = {}
     start = time.time()
     if MODEL_CHOICE == "baseline":
-        test_probs, test_labels, result = handle_baseline_eval(
-            model, val_loader, test_loader, result, device
+        val_probs, val_labels, result = handle_baseline_eval(
+            model, val_loader, val_loader, result, device
         )
     else:
-        test_probs, test_labels, result = handle_siamese_eval(
-                    model, test_loader, result, device, train_df
+        val_probs, val_labels, result = handle_siamese_eval(
+                    model, val_loader, result, device, train_df
                 )
     result["scoring_seconds"] = time.time() - start
-    labels, probs = test_labels.numpy(), test_probs.numpy()
+    labels, probs = val_labels.numpy(), val_labels.numpy()
 
     # checking if confidence track correctness
     confidence, correct = confidence_and_correct(labels, probs)
