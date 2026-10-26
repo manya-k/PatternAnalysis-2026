@@ -19,11 +19,11 @@ import time
 import matplotlib
 matplotlib.use("Agg")  # save plots to file without needing a display (e.g. on Rangpur)
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from sklearn.metrics import roc_auc_score
 from torch import nn
 from torch.utils.data import DataLoader
-import numpy as np
 
 from dataset import LesionDataset, PairDataset, build_transforms, get_splits
 from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_parameters
@@ -286,7 +286,8 @@ def save_training_summary(summary, weights_path):
           f"total {summary['total_minutes']:.1f} min | peak GPU memory "
           f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device})'}")
 
-def train_epochs(setup, optimizer, val_loader, device):
+def train_epochs(setup, optimizer, val_loader, device, args):
+    """Train with early stopping on val AUROC. Returns the path of the best checkpoint."""
     history = []
     weights_path = os.path.join(OUT_DIR, f"{MODEL_CHOICE}_best.pt")
     start = time.time()
@@ -307,7 +308,7 @@ def train_epochs(setup, optimizer, val_loader, device):
             val = evaluate_siamese(model, setup["bank_loader"], val_loader, setup["val_pair_loader"], loss_fn, device, K)
         
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
-                    "val_auroc": val["auroc"], "val_accuracy": val["accuracy"], "k": K,
+                    "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
                     "seconds": time.time() - epoch_start})
         
         print(f"epoch {epoch} | train loss {train_loss:.4f} | val loss {val['loss']:.4f} | "
@@ -322,14 +323,18 @@ def train_epochs(setup, optimizer, val_loader, device):
                 print(f"early stopping: no improvement for {PATIENCE} epochs")
                 break
     
+    # "args" records every setting of this run (including k), and predict.py reads k from it.
     save_training_summary({
-        "model": MODEL_CHOICE, "device": str(device), "lr": LR, "best_val_auroc": best_auroc,
-        "parameters": count_parameters(model), "total_minutes": (time.time() - start) / 60, 
+        "model": MODEL_CHOICE, "device": str(device), "args": vars(args), "lr": LR,
+        "best_val_auroc": best_auroc, "parameters": count_parameters(model),
+        "total_minutes": (time.time() - start) / 60,
         "peak_gpu_memory_gib": memory.peak_gib(), "history": history,
     }, weights_path)
-    
+    return weights_path
+
 
 def main():
+    args = parse_args()
     torch.manual_seed(SEED)
     device = pick_device()
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -352,8 +357,11 @@ def main():
     print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
           f"{setup['details']} | parameters {count_parameters(model):,}")
     
-    train_epochs(setup, optimizer, val_loader, device)
-    tune_model(setup["model"], device, train_set, val_loader)
+    weights_path = train_epochs(setup, optimizer, val_loader, device, args)
+
+    # Tune and test the best checkpoint, not the weights from the last epoch.
+    model.load_state_dict(torch.load(weights_path, map_location=device))
+    tune_model(model, device, train_set, val_loader)
 
 
 def closure(optimizer, logits, log_t, labels):
@@ -368,7 +376,9 @@ def fit_temperature(logits, labels):
     """
     log_t = torch.zeros(1, requires_grad=True)  # optimise log T so that T stays positive
     optimizer = torch.optim.LBFGS([log_t], lr=0.1, max_iter=200)
-    closure(optimizer, logits, log_t, labels)
+    # LBFGS calls the closure itself (several times per step), so it must take no arguments.
+    optimizer.step(lambda: closure(optimizer, logits, log_t, labels))
+    return log_t.exp().item()
 
 
 @torch.no_grad()
@@ -394,8 +404,8 @@ def handle_baseline_eval(model, val_loader, result, device):
     result["temperature"] = temperature
     return val_probs, val_labels, result
 
-def handle_siamese_eval(model, val_loader, result, device, dfT):      
-    bank, bank_labels = embed_all(model, loader(LesionDataset(dfT, "train")), device)
+def handle_siamese_eval(model, val_loader, result, device, train_df):
+    bank, bank_labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
     val_embeddings, val_labels = embed_all(model, val_loader, device)
     
     val_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, K)
