@@ -9,9 +9,6 @@ Train and validate the models, saving the best weights and the training curves.
 Usage example:
     python train.py --model baseline --subset 1000 --epochs 1
     python train.py --model siamese  --subset 1000 --epochs 1
-
-The test split is not used during training or model selection. After training, the best
-checkpoint is evaluated once on the test split (see test_best_model / evaluate.py).
 """
 
 import argparse
@@ -26,6 +23,7 @@ import torch
 from sklearn.metrics import roc_auc_score
 from torch import nn
 from torch.utils.data import DataLoader
+import numpy as np
 
 from dataset import LesionDataset, PairDataset, build_transforms, get_splits
 from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_parameters
@@ -38,30 +36,30 @@ EPOCHS = 20
 BATCH_SIZE = 32
 LR = 1e-4
 PATIENCE = 5  # early stopping: stop if val AUROC does not improve
-SUBSET = None  # for quick smoke tests, use a random subset of the training data
 NUM_WORKERS = 4  # for DataLoader
 SEED = 0  # for reproducibility
 MARGIN = 1.0  # for contrastive loss
 K = 5  # for kNN classification of validation images
 
+
+
 def parse_args():
-    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K
+    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, K
 
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
     parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
     parser.add_argument("--epochs", type=int, default=EPOCHS)
     parser.add_argument("--batch_size", type=int, default=BATCH_SIZE)
     parser.add_argument("--patience", type=int, default=PATIENCE)
-    parser.add_argument("--subset", type=int, default=SUBSET)
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--margin", type=float, default=MARGIN, help="contrastive loss margin")
     parser.add_argument("--k", type=int, default=K, help="k for kNN classification of validation images")
 
     args = parser.parse_args()
-    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, SUBSET, NUM_WORKERS, SEED, MARGIN, K = (
+    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, K = (
         args.model, args.epochs, args.batch_size,
-        args.patience, args.subset, args.num_workers, args.seed, args.margin, args.k
+        args.patience, args.num_workers, args.seed, args.margin, args.k
     )
 
     return args
@@ -113,6 +111,7 @@ def sample_split(df, split, size, seed):
     rows = df[df["split"] == split]
     if size is None or size >= len(rows):
         return rows
+    # added extra for smoke test
     return rows.sample(n=size, random_state=seed)
 
 
@@ -231,27 +230,15 @@ def evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, d
         "accuracy": ((probs >= 0.5).long() == labels).float().mean().item(),
     }
 
-def closure(optimizer, logits, log_t, labels):
-    optimizer.zero_grad()
-    loss = torch.nn.functional.cross_entropy(logits / log_t.exp(), labels)
-    loss.backward()
-    return loss.detach()
-    
-def fit_temperature(logits, labels):
-    """
-    Temperature scaling
-    """
-    log_t = torch.zeros(1, requires_grad=True)  # optimise log T so that T stays positive
-    optimizer = torch.optim.LBFGS([log_t], lr=0.1, max_iter=200)
-    closure(optimizer, logits, log_t, labels)
 
-
-def plot_history(history, path, loss_label):
+def plot_history(history, path):
     """Training/validation loss and validation AUROC per epoch."""
     epochs = [h["epoch"] for h in history]
     fig, (ax_loss, ax_auc) = plt.subplots(1, 2, figsize=(10, 4))
     ax_loss.plot(epochs, [h["train_loss"] for h in history], marker="o", label="train")
     ax_loss.plot(epochs, [h["val_loss"] for h in history], marker="o", label="validation")
+
+    loss_label = "weighted cross-entropy" if MODEL_CHOICE == "baseline" else "contrastive loss"
     ax_loss.set(xlabel="epoch", ylabel=loss_label, title="Loss")
     ax_loss.legend()
     ax_auc.plot(epochs, [h["val_auroc"] for h in history], marker="o", color="tab:green")
@@ -271,8 +258,7 @@ def setup_baseline(train_set, device):
     return {
         "model": BaselineClassifier(pretrained=True).to(device),
         "loss_fn": nn.CrossEntropyLoss(weight=weights.to(device)),
-        "loss_label": "weighted cross-entropy",
-        "train_loader": loader(LesionDataset(train_set, "train", build_transforms(train=True)), shuffle=True),
+        "train_loader": loader(LesionDataset(train_set, "train", build_transforms(train=True)), True),
         "details": f"class weights {[round(w, 2) for w in weights.tolist()]}",
     }
 
@@ -284,12 +270,9 @@ def setup_siamese(train_set, val_set, device):
     return {
         "model": SiameseNet(pretrained=True).to(device),
         "loss_fn": ContrastiveLoss(margin=MARGIN),
-        "loss_label": "contrastive loss",
         "train_pairs": train_pairs,
         "train_loader": loader(train_pairs, shuffle=True),
-        # fixed validation pairs, so the contrastive loss can be computed for the curves.
         "val_pair_loader": loader(PairDataset(val_set, "val", transform=build_transforms(train=False), seed=SEED)),
-        # reference bank: training images without augmentation, embedded each epoch for kNN.
         "bank_loader": loader(LesionDataset(train_set, "train")),
         "details": f"pairs/epoch {len(train_pairs)} | margin {MARGIN} | k {K}",
     }
@@ -297,10 +280,13 @@ def setup_siamese(train_set, val_set, device):
 
 def run_epoch(setup, epoch, optimizer, val_loader, device, memory):
     """Train for one epoch, then validate. Returns (train loss, validation results)."""
-    model, loss_fn = setup["model"], setup["loss_fn"]
+    model = setup["model"]
+    loss_fn = setup["loss_fn"]
+
     if MODEL_CHOICE == "baseline":
         train_loss = train_one_epoch(model, setup["train_loader"], loss_fn, optimizer, device, memory)
         return train_loss, evaluate(model, val_loader, loss_fn, device)
+    
     setup["train_pairs"].set_epoch(epoch)  # fresh pairs every epoch
     train_loss = train_one_epoch_siamese(model, setup["train_loader"], loss_fn, optimizer, device, memory)
     val = evaluate_siamese(model, setup["bank_loader"], val_loader, setup["val_pair_loader"], loss_fn, device, K)
@@ -317,40 +303,31 @@ def save_training_summary(summary, loss_label, weights_path):
           f"total {summary['total_minutes']:.1f} min | peak GPU memory "
           f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device})'}")
 
-
-def main():
-    args = parse_args()
-    torch.manual_seed(SEED)
-    device = pick_device()
-    os.makedirs(OUT_DIR, exist_ok=True)
-
-    # The test split is only used after training, by test_best_model.
-    df = get_splits(DATA_ROOT)
-    train_set = sample_split(df, "train", SUBSET, SEED)
-    val_set = sample_split(df, "val", SUBSET and SUBSET // 2, SEED)
-    test_set = sample_split(df, "test", SUBSET and SUBSET // 2, SEED)
-    val_loader = loader(LesionDataset(val_set, "val"))
-
-    setup = setup_baseline(train_set, device) if MODEL_CHOICE == "baseline" else setup_siamese(train_set, val_set, device)
-    model = setup["model"]
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
-    print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
-          f"{setup['details']} | parameters {count_parameters(model):,}")
-
+def train_epochs(setup, optimizer, val_loader, device, memory):
+    history = []
     weights_path = os.path.join(OUT_DIR, f"{MODEL_CHOICE}_best.pt")
-    history, best_auroc, epochs_since_best = [], -1.0, 0
-    memory = PeakMemory(device)
     start = time.time()
+    memory = PeakMemory(device)
+    best_auroc, epochs_since_best = -1.0, 0
     for epoch in range(1, EPOCHS + 1):
         epoch_start = time.time()
-        train_loss, val = run_epoch(setup, epoch, optimizer, val_loader, device, memory)
-        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
-                        "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
-                        "seconds": time.time() - epoch_start})
-        print(f"epoch {epoch:>3} | train loss {train_loss:.4f} | val loss {val['loss']:.4f} | "
-              f"val AUROC {val['auroc']:.4f} | val acc {val['accuracy']:.4f} | {history[-1]['seconds']:.0f}s")
+        model = setup["model"]
+        loss_fn = setup["loss_fn"]
 
-        # Keep the weights with the best validation AUROC; stop early if it stops improving.
+        if MODEL_CHOICE == "baseline":
+            train_loss = train_one_epoch(model, setup["train_loader"], loss_fn, optimizer, device, memory)
+            val = evaluate(model, val_loader, loss_fn, device)
+        else:
+            setup["train_pairs"].set_epoch(epoch)  # fresh pairs every epoch
+            train_loss = train_one_epoch_siamese(model, setup["train_loader"], loss_fn, optimizer, device, memory)
+            val = evaluate_siamese(model, setup["bank_loader"], val_loader, setup["val_pair_loader"], loss_fn, device, K)
+        
+        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
+                    "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
+                    "seconds": time.time() - epoch_start})
+        print(f"epoch {epoch} | train loss {train_loss:.4f} | val loss {val['loss']:.4f} | "
+            f"val AUROC {val['auroc']:.4f} | val acc {val['accuracy']:.4f} | {history[-1]['seconds']:.0f}s")
+            
         if val["auroc"] > best_auroc:
             best_auroc, epochs_since_best = val["auroc"], 0
             torch.save(model.state_dict(), weights_path)
@@ -358,32 +335,110 @@ def main():
             epochs_since_best += 1
             if epochs_since_best >= PATIENCE:
                 print(f"early stopping: no improvement for {PATIENCE} epochs")
-                break
-
+    
     save_training_summary({
-        "model": MODEL_CHOICE, "device": str(device), "args": vars(args), "lr": LR,
-        "best_val_auroc": best_auroc, "parameters": count_parameters(model),
-        "total_minutes": (time.time() - start) / 60,
+        "model": MODEL_CHOICE, "device": str(device), "lr": LR, "best_val_auroc": best_auroc,
+        "parameters": count_parameters(model), "total_minutes": (time.time() - start) / 60, 
         "peak_gpu_memory_gib": memory.peak_gib(), "history": history,
     }, setup["loss_label"], weights_path)
-    test_best_model(device, train_set, val_set, test_set)
+    
+
+def main():
+    args = parse_args()
+    torch.manual_seed(SEED)
+    device = pick_device()
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    df = get_splits(DATA_ROOT)
+    train_set = sample_split(df, "train", None, SEED)
+    val_set = sample_split(df, "val", None, SEED)
+    test_set = sample_split(df, "test", None, SEED)
+    # each model calls its own train loader as appropriate
+    test_loader = loader(LesionDataset(test_set, "test"))
+    val_loader = loader(LesionDataset(val_set, "val"))
+
+    setup = {}
+    if MODEL_CHOICE == "baseline":
+        setup = setup_baseline(train_set, device)
+    else:
+        setup = setup_siamese(train_set, val_set, device)
+
+    model = setup["model"]
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+    print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
+          f"{setup['details']} | parameters {count_parameters(model):,}")
+    
+    train_epochs(setup, optimizer, val_loader, device)
+    tune_model(setup["model"], device, train_set, val_loader, test_loader)
 
 
-def test_best_model(device, train_df, val_df, test_df):
-    from evaluate import evaluate_model  # imported here: evaluate.py itself imports from train.py
+def closure(optimizer, logits, log_t, labels):
+    optimizer.zero_grad()
+    loss = torch.nn.functional.cross_entropy(logits / log_t.exp(), labels)
+    loss.backward()
+    return loss.detach()
+    
+def fit_temperature(logits, labels):
+    """
+    Temperature scaling
+    """
+    log_t = torch.zeros(1, requires_grad=True)  # optimise log T so that T stays positive
+    optimizer = torch.optim.LBFGS([log_t], lr=0.1, max_iter=200)
+    closure(optimizer, logits, log_t, labels)
 
-    print(f"\ntesting best {MODEL_CHOICE} checkpoint on {len(test_df)} test images ...")
-    result, _, _ = evaluate_model(MODEL_CHOICE, device, train_df, val_df, test_df)
-    with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_test_results.json"), "w") as f:
-        json.dump(result, f, indent=2)
 
-    test, reject = result["test"], result["reject_rule_test"]
-    print(f"test accuracy {test['accuracy']:.4f} | AUROC {test['auroc']:.4f} | PR-AUC {test['pr_auc']:.4f} | "
-          f"melanoma recall {test['recall_melanoma (sensitivity)']:.4f} | ECE {result['test_ece']:.4f}")
-    recall = reject["melanoma_recall_auto_decided"]
-    recall_text = "n/a (all referred)" if recall is None else f"{recall:.4f}"
-    print(f"reject rule: {reject['referred']:.1%} referred | melanoma recall on auto-decided {recall_text} | "
-          f"latency {result['latency_ms_per_image']:.1f} ms/image")
+@torch.no_grad()
+def baseline_logits(model, data_loader, device):
+    """Raw 2-class logits and labels for every image in a loader."""
+    logits, labels = [], []
+    for images, targets, _ in data_loader:
+        logits.append(model(images.to(device)))
+        labels.append(targets)
+    return torch.cat(logits), torch.cat(labels)
+
+def handle_baseline_eval(model, val_loader, test_loader, result, device):
+    val_logits, val_labels = baseline_logits(model, val_loader, device)
+    test_logits, test_labels = baseline_logits(model, test_loader, device)
+    
+    # bc baseline produces logits, the temperature needs to be adjusted
+    temperature = fit_temperature(val_logits, val_labels)
+    test_probs = (test_logits / temperature).softmax(dim=1)[:, 1]
+
+    result["temperature"] = temperature
+    return test_probs, test_labels, result
+
+def handle_siamese_eval(model, test_loader, result, device, dfT):      
+    bank, bank_labels = embed_all(model, loader(LesionDataset(dfT, "train")), device)
+    test_embeddings, test_labels = embed_all(model, test_loader, device)
+    
+    test_probs = knn_melanoma_probability(test_embeddings, bank, bank_labels, K)
+    return test_probs, test_labels, result
+
+
+def tune_model(model, device, train_df, val_loader, test_loader):
+    result = {}
+    start = time.time()
+    if MODEL_CHOICE == "baseline":
+        test_probs, test_labels, result = handle_baseline_eval(
+            model, val_loader, test_loader, result, device
+        )
+    else:
+        test_probs, test_labels, result = handle_siamese_eval(
+                    model, test_loader, result, device, train_df
+                )
+    result["scoring_seconds"] = time.time() - start
+    labels, probs = test_labels.numpy(), test_probs.numpy()
+
+    # checking if confidence track correctness
+    confidence, correct = confidence_and_correct(labels, probs)
+    print(confidence, correct)
+    print(result)
+    return result
+
+def confidence_and_correct(labels, probs):
+    """Confidence = probability of the predicted class, max(p, 1 - p), in [0.5, 1]."""
+    preds = (probs >= 0.5).astype(int)
+    return np.maximum(probs, 1 - probs), preds == labels
 
 
 if __name__ == "__main__":
