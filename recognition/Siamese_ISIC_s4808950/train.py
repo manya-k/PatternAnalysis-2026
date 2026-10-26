@@ -10,7 +10,8 @@ Usage example:
     python train.py --model baseline --subset 1000 --epochs 1
     python train.py --model siamese  --subset 1000 --epochs 1
 
-The test split is never touched here; it is only used for the final evaluation.
+The test split is not used during training or model selection. After training, the best
+checkpoint is evaluated once on the test split (see test_best_model / evaluate.py).
 """
 
 import argparse
@@ -230,6 +231,20 @@ def evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, d
         "accuracy": ((probs >= 0.5).long() == labels).float().mean().item(),
     }
 
+def closure(optimizer, logits, log_t, labels):
+    optimizer.zero_grad()
+    loss = torch.nn.functional.cross_entropy(logits / log_t.exp(), labels)
+    loss.backward()
+    return loss.detach()
+    
+def fit_temperature(logits, labels):
+    """
+    Temperature scaling
+    """
+    log_t = torch.zeros(1, requires_grad=True)  # optimise log T so that T stays positive
+    optimizer = torch.optim.LBFGS([log_t], lr=0.1, max_iter=200)
+    closure(optimizer, logits, log_t, labels)
+
 
 def plot_history(history, path, loss_label):
     """Training/validation loss and validation AUROC per epoch."""
@@ -250,57 +265,85 @@ def plot_history(history, path, loss_label):
 def loader(dataset, shuffle=False):
     return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=shuffle, num_workers=NUM_WORKERS)
 
+def setup_baseline(train_set, device):
+    """Model, loss and training loader for the baseline."""
+    weights = class_weights(torch.tensor(train_set["target"].values))
+    return {
+        "model": BaselineClassifier(pretrained=True).to(device),
+        "loss_fn": nn.CrossEntropyLoss(weight=weights.to(device)),
+        "loss_label": "weighted cross-entropy",
+        "train_loader": loader(LesionDataset(train_set, "train", build_transforms(train=True)), shuffle=True),
+        "details": f"class weights {[round(w, 2) for w in weights.tolist()]}",
+    }
+
+
+def setup_siamese(train_set, val_set, device):
+    """Model, loss and loaders for the Siamese network."""
+    # Pair sampling balances the classes, so no class weights are needed.
+    train_pairs = PairDataset(train_set, "train", seed=SEED)
+    return {
+        "model": SiameseNet(pretrained=True).to(device),
+        "loss_fn": ContrastiveLoss(margin=MARGIN),
+        "loss_label": "contrastive loss",
+        "train_pairs": train_pairs,
+        "train_loader": loader(train_pairs, shuffle=True),
+        # fixed validation pairs, so the contrastive loss can be computed for the curves.
+        "val_pair_loader": loader(PairDataset(val_set, "val", transform=build_transforms(train=False), seed=SEED)),
+        # reference bank: training images without augmentation, embedded each epoch for kNN.
+        "bank_loader": loader(LesionDataset(train_set, "train")),
+        "details": f"pairs/epoch {len(train_pairs)} | margin {MARGIN} | k {K}",
+    }
+
+
+def run_epoch(setup, epoch, optimizer, val_loader, device, memory):
+    """Train for one epoch, then validate. Returns (train loss, validation results)."""
+    model, loss_fn = setup["model"], setup["loss_fn"]
+    if MODEL_CHOICE == "baseline":
+        train_loss = train_one_epoch(model, setup["train_loader"], loss_fn, optimizer, device, memory)
+        return train_loss, evaluate(model, val_loader, loss_fn, device)
+    setup["train_pairs"].set_epoch(epoch)  # fresh pairs every epoch
+    train_loss = train_one_epoch_siamese(model, setup["train_loader"], loss_fn, optimizer, device, memory)
+    val = evaluate_siamese(model, setup["bank_loader"], val_loader, setup["val_pair_loader"], loss_fn, device, K)
+    return train_loss, val
+
+
+def save_training_summary(summary, loss_label, weights_path):
+    """Save the history (for logs and the README), plot the curves and print a summary line."""
+    with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_history.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+    plot_history(summary["history"], os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"), loss_label)
+    peak, device = summary["peak_gpu_memory_gib"], summary["device"]
+    print(f"best val AUROC {summary['best_val_auroc']:.4f} | weights -> {weights_path} | "
+          f"total {summary['total_minutes']:.1f} min | peak GPU memory "
+          f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device})'}")
+
+
 def main():
     args = parse_args()
     torch.manual_seed(SEED)
     device = pick_device()
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # splitting the data to train with augmentation, validate without.
+    # The test split is only used after training, by test_best_model.
     df = get_splits(DATA_ROOT)
     train_set = sample_split(df, "train", SUBSET, SEED)
     val_set = sample_split(df, "val", SUBSET and SUBSET // 2, SEED)
+    test_set = sample_split(df, "test", SUBSET and SUBSET // 2, SEED)
     val_loader = loader(LesionDataset(val_set, "val"))
 
-    if MODEL_CHOICE == "baseline":
-        train_loader = loader(LesionDataset(train_set, "train", build_transforms(train=True)), shuffle=True)
-        model = BaselineClassifier(pretrained=True).to(device)
-        weights = class_weights(torch.tensor(train_set["target"].values))
-        loss_fn = nn.CrossEntropyLoss(weight=weights.to(device))
-        loss_label = "weighted cross-entropy"
-        details = f"class weights {[round(w, 2) for w in weights.tolist()]}"
-    else:
-        # Pair sampling balances the classes, so no class weights are needed.
-        train_pairs = PairDataset(train_set, "train", seed=SEED)
-        train_loader = loader(train_pairs, shuffle=True)
-        # need another loader for the validation pairs, so the contrastive loss can be computed for the curves.
-        val_pair_loader = loader(PairDataset(val_set, "val", transform=build_transforms(train=False), seed=SEED))
-        
-        # Reference bank: training images without augmentation, embedded each epoch for kNN.
-        bank_loader = loader(LesionDataset(train_set, "train"))
-        model = SiameseNet(pretrained=True).to(device)
-        loss_fn = ContrastiveLoss(margin=MARGIN)
-        loss_label = "contrastive loss"
-        details = f"pairs/epoch {len(train_pairs)} | margin {MARGIN} | k {K}"
-
+    setup = setup_baseline(train_set, device) if MODEL_CHOICE == "baseline" else setup_siamese(train_set, val_set, device)
+    model = setup["model"]
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
-          f"{details} | parameters {count_parameters(model):,}")
+          f"{setup['details']} | parameters {count_parameters(model):,}")
 
     weights_path = os.path.join(OUT_DIR, f"{MODEL_CHOICE}_best.pt")
     history, best_auroc, epochs_since_best = [], -1.0, 0
     memory = PeakMemory(device)
     start = time.time()
-
     for epoch in range(1, EPOCHS + 1):
         epoch_start = time.time()
-        if MODEL_CHOICE == "baseline":
-            train_loss = train_one_epoch(model, train_loader, loss_fn, optimizer, device, memory)
-            val = evaluate(model, val_loader, loss_fn, device)
-        else:
-            train_pairs.set_epoch(epoch)  # fresh pairs every epoch
-            train_loss = train_one_epoch_siamese(model, train_loader, loss_fn, optimizer, device, memory)
-            val = evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, device, K)
+        train_loss, val = run_epoch(setup, epoch, optimizer, val_loader, device, memory)
         history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val["loss"],
                         "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
                         "seconds": time.time() - epoch_start})
@@ -310,7 +353,6 @@ def main():
         # Keep the weights with the best validation AUROC; stop early if it stops improving.
         if val["auroc"] > best_auroc:
             best_auroc, epochs_since_best = val["auroc"], 0
-            # save the weights of the best model so far, for later evaluation on the test split
             torch.save(model.state_dict(), weights_path)
         else:
             epochs_since_best += 1
@@ -318,22 +360,30 @@ def main():
                 print(f"early stopping: no improvement for {PATIENCE} epochs")
                 break
 
-    summary = {
+    save_training_summary({
         "model": MODEL_CHOICE, "device": str(device), "args": vars(args), "lr": LR,
         "best_val_auroc": best_auroc, "parameters": count_parameters(model),
         "total_minutes": (time.time() - start) / 60,
-        "peak_gpu_memory_gib": memory.peak_gib(),
-        "history": history,
-    }
-    # saving for logs and later analysis
-    with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_history.json"), "w") as f:
-        json.dump(summary, f, indent=2)
-    plot_history(history, os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"), loss_label)
+        "peak_gpu_memory_gib": memory.peak_gib(), "history": history,
+    }, setup["loss_label"], weights_path)
+    test_best_model(device, train_set, val_set, test_set)
 
-    peak = memory.peak_gib()
-    print(f"best val AUROC {best_auroc:.4f} | weights -> {weights_path} | "
-          f"total {summary['total_minutes']:.1f} min | peak GPU memory "
-          f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device.type})'}")
+
+def test_best_model(device, train_df, val_df, test_df):
+    from evaluate import evaluate_model  # imported here: evaluate.py itself imports from train.py
+
+    print(f"\ntesting best {MODEL_CHOICE} checkpoint on {len(test_df)} test images ...")
+    result, _, _ = evaluate_model(MODEL_CHOICE, device, train_df, val_df, test_df)
+    with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_test_results.json"), "w") as f:
+        json.dump(result, f, indent=2)
+
+    test, reject = result["test"], result["reject_rule_test"]
+    print(f"test accuracy {test['accuracy']:.4f} | AUROC {test['auroc']:.4f} | PR-AUC {test['pr_auc']:.4f} | "
+          f"melanoma recall {test['recall_melanoma (sensitivity)']:.4f} | ECE {result['test_ece']:.4f}")
+    recall = reject["melanoma_recall_auto_decided"]
+    recall_text = "n/a (all referred)" if recall is None else f"{recall:.4f}"
+    print(f"reject rule: {reject['referred']:.1%} referred | melanoma recall on auto-decided {recall_text} | "
+          f"latency {result['latency_ms_per_image']:.1f} ms/image")
 
 
 if __name__ == "__main__":
