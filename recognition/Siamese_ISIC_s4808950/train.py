@@ -41,6 +41,7 @@ SEED = 0  # for reproducibility
 MARGIN = 1.0  # for contrastive loss
 K = 5  # for kNN classification of validation images
 
+RECALL_TARGET = 0.95
 def parse_args():
     global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, K
 
@@ -425,11 +426,44 @@ def tune_model(model, device, train_df, val_loader):
     result["scoring_seconds"] = time.time() - start
     labels, probs = val_labels.numpy(), val_probs.numpy()
 
-    # checking if confidence track correctness
-    confidence, correct = confidence_and_correct(labels, probs)
-    print(confidence, correct)
+    #check for threshbhold, k, 
+
+    threshold = choose_threshold(val_labels, val_probs)
+    result["reject_rule_validation"] = apply_reject_rule(val_labels, val_probs, threshold)
+
     print(result)
     return result
+
+def apply_reject_rule(labels, probs, threshold):
+    """Outcome of the reject rule on one split."""
+    confidence, correct = confidence_and_correct(labels, probs)
+    preds = (probs >= 0.5).astype(int)
+    auto = confidence >= threshold
+    auto_melanoma = auto & (labels == 1)
+    missed = int((auto_melanoma & (preds == 0)).sum())
+    return {
+        "threshold": threshold if np.isfinite(threshold) else None,  # None = refer every case
+        "auto_decided": float(auto.mean()),
+        "referred": float(1 - auto.mean()),
+        "accuracy_auto_decided": float(correct[auto].mean()) if auto.any() else None,
+        "melanoma_recall_auto_decided": float((preds[auto_melanoma] == 1).mean()) if auto_melanoma.any() else None,
+        "melanomas_missed_by_automation": missed,
+        # If every referred case is correctly diagnosed by the specialist:
+        "system_melanoma_sensitivity": float(1 - missed / max(int(labels.sum()), 1)),
+    }
+def choose_threshold(labels, probs, target_recall=RECALL_TARGET):
+    """
+    Reject rule, fitted on VALIDATION: auto-decide a case only if its confidence >= t,
+    otherwise refer it. Returns the smallest t (i.e. the most cases automated) for which
+    melanoma recall among the auto-decided cases is >= target_recall.
+    """
+    confidence, _ = confidence_and_correct(labels, probs)
+    preds = (probs >= 0.5).astype(int)
+    for t in np.unique(confidence):  # ascending: lower t automates more cases
+        auto_melanoma = (confidence >= t) & (labels == 1)
+        if auto_melanoma.any() and (preds[auto_melanoma] == 1).mean() >= target_recall:
+            return float(t)
+    return float("inf")  # no threshold reaches the target: refer every case
 
 def confidence_and_correct(labels, probs):
     """Confidence = probability of the predicted class, max(p, 1 - p), in [0.5, 1]."""
