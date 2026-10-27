@@ -43,7 +43,7 @@ K = 5  # for kNN classification of validation images
 
 RECALL_TARGET = 0.95
 def parse_args():
-    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, K
+    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN
 
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
     parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
@@ -53,12 +53,11 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--margin", type=float, default=MARGIN, help="contrastive loss margin")
-    parser.add_argument("--k", type=int, default=K, help="k for kNN classification of validation images")
 
     args = parser.parse_args()
-    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, K = (
+    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN = (
         args.model, args.epochs, args.batch_size,
-        args.patience, args.num_workers, args.seed, args.margin, args.k
+        args.patience, args.num_workers, args.seed, args.margin
     )
 
     return args
@@ -326,7 +325,7 @@ def train_epochs(setup, optimizer, val_loader, device, args):
     
     # "args" records every setting of this run (including k), and predict.py reads k from it.
     save_training_summary({
-        "model": MODEL_CHOICE, "device": str(device), "args": vars(args), "lr": LR,
+        "model": MODEL_CHOICE, "device": str(device), "k": K "lr": LR,
         "best_val_auroc": best_auroc, "parameters": count_parameters(model),
         "total_minutes": (time.time() - start) / 60,
         "peak_gpu_memory_gib": memory.peak_gib(), "history": history,
@@ -426,10 +425,9 @@ def tune_model(model, device, train_df, val_loader):
     result["scoring_seconds"] = time.time() - start
     labels, probs = val_labels.numpy(), val_probs.numpy()
 
-    #check for threshbhold, k, 
-
+    #check for threshbhold, k, r
     threshold = choose_threshold(val_labels, val_probs)
-    result["reject_rule_validation"] = apply_reject_rule(val_labels, val_probs, threshold)
+    result["reject_rule_validation"] = apply_reject_rule(labels, probs, threshold)
 
     print(result)
     return result
