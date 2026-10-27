@@ -42,6 +42,7 @@ MARGIN = 1.0  # for contrastive loss
 K = 5  # for kNN classification of validation images
 
 RECALL_TARGET = 0.95
+K_CANDIDATES = (3, 5, 10, 15, 20, 25, 30, 50, 75, 100, 150, 200) 
 def parse_args():
     global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN
 
@@ -323,9 +324,9 @@ def train_epochs(setup, optimizer, val_loader, device, args):
                 print(f"early stopping: no improvement for {PATIENCE} epochs")
                 break
     
-    # "args" records every setting of this run (including k), and predict.py reads k from it.
+    # training_k is the k used to choose the best epoch; the tuned k is saved by tune_model.
     save_training_summary({
-        "model": MODEL_CHOICE, "device": str(device), "k": K "lr": LR,
+        "model": MODEL_CHOICE, "device": str(device), "training_k": K, "lr": LR,
         "best_val_auroc": best_auroc, "parameters": count_parameters(model),
         "total_minutes": (time.time() - start) / 60,
         "peak_gpu_memory_gib": memory.peak_gib(), "history": history,
@@ -361,7 +362,6 @@ def main():
 
     # Tune and test the best checkpoint, not the weights from the last epoch.
     model.load_state_dict(torch.load(weights_path, map_location=device))
-    tune_model(model, device, train_set, val_loader)
 
 
 def closure(optimizer, logits, log_t, labels):
@@ -404,13 +404,18 @@ def handle_baseline_eval(model, val_loader, result, device):
     result["temperature"] = temperature
     return val_probs, val_labels, result
 
+
 def handle_siamese_eval(model, val_loader, result, device, train_df):
+
     bank, bank_labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
     val_embeddings, val_labels = embed_all(model, val_loader, device)
-    
-    val_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, K)
-    return val_probs, val_labels, result
-
+    for k in K_CANDIDATES:
+        probs = knn_melanoma_probability(val_embeddings,bank, bank_labels, k)
+        conf, correct = confidence_and_correct(val_labels, probs)
+        # calculate aurc, aurpc
+        #and udr thr one that gives the lowest aurc   
+        print(k)
+    # return the prob with the best k and labels and result[k] again
 
 def tune_model(model, device, train_df, val_loader):
     result = {}
@@ -426,10 +431,14 @@ def tune_model(model, device, train_df, val_loader):
     labels, probs = val_labels.numpy(), val_probs.numpy()
 
     #check for threshbhold, k, r
-    threshold = choose_threshold(val_labels, val_probs)
+    threshold = choose_threshold(labels, probs)
     result["reject_rule_validation"] = apply_reject_rule(labels, probs, threshold)
-
     print(result)
+
+    # Save the validation-tuned settings so the test step and predict.py use the tuned k,
+    # temperature and threshold rather than the defaults the model was trained with.
+    with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_tuned.json"), "w") as f:
+        json.dump(result, f, indent=2)
     return result
 
 def apply_reject_rule(labels, probs, threshold):
