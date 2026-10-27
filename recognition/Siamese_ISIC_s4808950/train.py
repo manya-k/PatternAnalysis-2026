@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 
 from dataset import LesionDataset, PairDataset, build_transforms, get_splits
 from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_parameters
-from metrics import risk_coverage, plot_risk_coverage, confidence_and_correct
+from metrics import calibration, confidence_and_correct, plot_k_tuning, risk_coverage
 
 OUT_DIR = "outputs"
 DATA_ROOT = "data"
@@ -363,6 +363,7 @@ def main():
 
     # Tune and test the best checkpoint, not the weights from the last epoch.
     model.load_state_dict(torch.load(weights_path, map_location=device))
+    tune_model(model, device, train_set, val_loader)
 
 
 def closure(optimizer, logits, log_t, labels):
@@ -402,7 +403,14 @@ def handle_baseline_eval(model, val_loader, result, device):
     temperature = fit_temperature(val_logits, val_labels)
     val_probs = melanoma_probability_from_logits(val_logits, temperature)
 
+    # Before/after: T only changes how confident the probabilities are, so ECE should drop.
+    labels = val_labels.numpy()
+    ece_before, _ = calibration(*confidence_and_correct(labels, melanoma_probability_from_logits(val_logits).numpy()))
+    ece_after, _ = calibration(*confidence_and_correct(labels, val_probs.numpy()))
+    print(f"temperature T = {temperature:} | val ECE {ece_before:} (T = 1) -> {ece_after:} (tuned)")
+
     result["temperature"] = temperature
+    result["val_ece_before_temperature"], result["val_ece_after_temperature"] = ece_before, ece_after
     return val_probs, val_labels, result
 
 
@@ -423,8 +431,14 @@ def handle_siamese_eval(model, val_loader, result, device, train_df):
         print(f"k {k:} | val AURC {k_scores[k]['val_aurc']:.4f} | val AUROC {k_scores[k]['val_auroc']:.4f} ")
 
     best_k = min(k_scores, key=lambda k: k_scores[k]["val_aurc"])
-    print(f"chosen k = {best_k}")
-    result["k"], result["k_sweep"] = best_k, k_scores
+    # Before/after: K is the k used during training to pick the best epoch.
+    if K in k_scores:
+        print(f"k {K} (training) -> {best_k} (tuned) | "
+              f"val AURC {k_scores[K]['val_aurc']:.4f} -> {k_scores[best_k]['val_aurc']:.4f} | "
+              f"val AUROC {k_scores[K]['val_auroc']:.4f} -> {k_scores[best_k]['val_auroc']:.4f}")
+    
+    plot_k_tuning(k_scores, best_k, os.path.join(OUT_DIR, "siamese_k_tuning.png"))
+    result["k"], result["k_scores"] = best_k, k_scores
     val_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, best_k)
     return val_probs, val_labels, result
 
@@ -488,3 +502,11 @@ def choose_threshold(labels, probs, target_recall=RECALL_TARGET):
 
 if __name__ == "__main__":
     main()
+
+"""
+things remaining in this file:
+1. obv the test code
+2. ece - callibration error 
+3. and also discrimiation and all the plots 
+need to organise the code file ong
+"""
