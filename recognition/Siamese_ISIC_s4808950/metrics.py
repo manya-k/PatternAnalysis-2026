@@ -2,6 +2,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+N_BINS = 15 
 
 def confidence_and_correct(labels, probs):
     """Confidence = probability of the predicted class, max(p, 1 - p), in [0.5, 1]."""
@@ -9,7 +10,29 @@ def confidence_and_correct(labels, probs):
     return np.maximum(probs, 1 - probs), preds == labels
 
 
+def calibration(confidence, correct, n_bins=N_BINS):
+    """
+    Expected calibration error: split predictions into confidence bins and average the gap
+    between mean confidence and actual accuracy in each bin, weighted by bin size. A model
+    that says "90% sure" should be right 90% of the time; ECE measures how far off it is.
+
+    This block of code is inspired from https://github.com/feder-cr/jev/wiki/expected-calibration-error-explained
+    """
+    edges = np.linspace(0.5, 1.0, n_bins + 1)
+    bins = np.clip(np.digitize(confidence, edges[1:-1]), 0, n_bins - 1)
+    ece, table = 0.0, []
+    for b in range(n_bins):
+        in_bin = bins == b
+        if in_bin.any():
+            gap = abs(confidence[in_bin].mean() - correct[in_bin].mean())
+            ece += in_bin.mean() * gap
+            table.append({"confidence": float(confidence[in_bin].mean()),
+                          "accuracy": float(correct[in_bin].mean()), "count": int(in_bin.sum())})
+    return float(ece), table
+
+
 def risk_coverage(confidence, correct):
+
     order = np.argsort(-confidence, kind="stable")
     conf, errors = confidence[order], np.cumsum(~correct[order])
     n = len(order)

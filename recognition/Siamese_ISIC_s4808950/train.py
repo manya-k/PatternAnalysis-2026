@@ -5,7 +5,6 @@ Train and validate the models, saving the best weights and the training curves.
   --model siamese:  Siamese network trained on image pairs with contrastive loss,
                     validated by k-nearest-neighbour classification against the
                     embedded training images.
-
 Usage example:
     python train.py --model baseline
     python train.py --model siamese
@@ -20,6 +19,7 @@ import matplotlib
 matplotlib.use("Agg")  # save plots to file without needing a display (e.g. on Rangpur)
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import roc_auc_score
 from torch import nn
@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 from dataset import LesionDataset, PairDataset, build_transforms, get_splits
 from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_parameters
 from metrics import calibration, confidence_and_correct, plot_k_tuning, risk_coverage
+                    
 
 OUT_DIR = "outputs"
 DATA_ROOT = "data"
@@ -497,6 +498,10 @@ def choose_threshold(labels, probs, target_recall=RECALL_TARGET):
         if auto_melanoma.any() and (preds[auto_melanoma] == 1).mean() >= target_recall:
             return float(t)
     return float("inf")  # no threshold reaches the target: refer every case
+
+
+if __name__ == "__main__":
+    main()
 
 
 

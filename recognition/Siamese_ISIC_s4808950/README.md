@@ -115,6 +115,8 @@ The split, the metrics and the reject-rule protocol stay fixed throughout, so an
 [6] V. Rotemberg *et al.*, "A patient-centric dataset of images and metadata for identifying melanomas using clinical context," *Scientific Data*, vol. 8, 2021.  
 [7] Kaggle, "ISIC Melanoma Dataset (resized to 224x224)," roua91. CC BY-NC 4.0.
 [8] H. Sulakhe, "siamesenetworks-pytorch: loss.py," GitHub repository. [Online]. Available: https://github.com/HarshSulakhe/siamesenetworks-pytorch/blob/master/loss.py (accessed Oct. 21, 2026).
+[9] https://github.com/feder-cr/jev/wiki/expected-calibration-error-explained
 
 ## AI Declaration:
 1. AI was used to add print statements to test and demonstrate that models are working as intentded before training and evaluation is completed. I did not know how I could check this with mock data so I turned to AI and it explained and help me add the prints at the end of `modules.py`
+2. Ai was asked for suggestion on how to layout the plan i had in mind. It suggested me to add extra file `evaluate.py` and also recommended some  functions i should implement such as tyemperature scaling and aroc etc however, eventually my mental model did not align with the structure it recommendded so i refactored the entire codebase into how I had structured in my mind
