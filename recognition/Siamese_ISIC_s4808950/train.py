@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader
 
 from dataset import LesionDataset, PairDataset, build_transforms, get_splits
 from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_parameters
+from metrics import risk_coverage, plot_risk_coverage, confidence_and_correct
 
 OUT_DIR = "outputs"
 DATA_ROOT = "data"
@@ -409,13 +410,24 @@ def handle_siamese_eval(model, val_loader, result, device, train_df):
 
     bank, bank_labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
     val_embeddings, val_labels = embed_all(model, val_loader, device)
+    # K in KNN Tunning
+    k_scores = {}
     for k in K_CANDIDATES:
-        probs = knn_melanoma_probability(val_embeddings,bank, bank_labels, k)
-        conf, correct = confidence_and_correct(val_labels, probs)
-        # calculate aurc, aurpc
-        #and udr thr one that gives the lowest aurc   
-        print(k)
-    # return the prob with the best k and labels and result[k] again
+        probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, k)
+        confidence, correct = confidence_and_correct(val_labels.numpy(), probs.numpy())
+        _, _, aurc = risk_coverage(confidence, correct)
+        k_scores[k] = {
+            "val_aurc": aurc,
+            "val_auroc": float(roc_auc_score(val_labels, probs)),
+        }
+        print(f"k {k:} | val AURC {k_scores[k]['val_aurc']:.4f} | val AUROC {k_scores[k]['val_auroc']:.4f} ")
+
+    best_k = min(k_scores, key=lambda k: k_scores[k]["val_aurc"])
+    print(f"chosen k = {best_k}")
+    result["k"], result["k_sweep"] = best_k, k_scores
+    val_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, best_k)
+    return val_probs, val_labels, result
+
 
 def tune_model(model, device, train_df, val_loader):
     result = {}
@@ -472,10 +484,6 @@ def choose_threshold(labels, probs, target_recall=RECALL_TARGET):
             return float(t)
     return float("inf")  # no threshold reaches the target: refer every case
 
-def confidence_and_correct(labels, probs):
-    """Confidence = probability of the predicted class, max(p, 1 - p), in [0.5, 1]."""
-    preds = (probs >= 0.5).astype(int)
-    return np.maximum(probs, 1 - probs), preds == labels
 
 
 if __name__ == "__main__":
