@@ -143,16 +143,20 @@ def plot_roc_pr(scores, path):
 
 
 
-def plot_k_tuning(k_scores, chosen_k, path):
-    """Validation AURC and AUROC for each candidate k, with the chosen k marked."""
-    ks = sorted(k_scores)
-    fig, (ax_aurc, ax_auroc) = plt.subplots(1, 2, figsize=(10, 4))
-    ax_aurc.plot(ks, [k_scores[k]["val_aurc"] for k in ks], marker="o")
+def plot_k_tuning(k_scores, chosen_k, chosen_vote, path):
+    """
+    Validation AURC and referral rate for each candidate k, one line per kNN vote
+    (plain / class-balanced), with the chosen setting marked.
+    """
+    fig, (ax_aurc, ax_referred) = plt.subplots(1, 2, figsize=(10, 4))
+    for vote, scores in k_scores.items():
+        ks = sorted(scores)
+        ax_aurc.plot(ks, [scores[k]["val_aurc"] for k in ks], marker="o", label=f"{vote} vote")
+        ax_referred.plot(ks, [scores[k]["val_referred"] for k in ks], marker="o", label=f"{vote} vote")
     ax_aurc.set(ylabel="val AURC (lower is better)", title="Risk-coverage area vs k")
-    ax_auroc.plot(ks, [k_scores[k]["val_auroc"] for k in ks], marker="o")
-    ax_auroc.set(ylabel="val AUROC (higher is better)", title="AUROC vs k")
-    for ax in (ax_aurc, ax_auroc):
-        ax.axvline(chosen_k, linestyle="--", color="grey", label=f"chosen k = {chosen_k}")
+    ax_referred.set(ylabel="val cases referred", title="Referral at the recall target vs k", ylim=(0, 1.05))
+    for ax in (ax_aurc, ax_referred):
+        ax.axvline(chosen_k, linestyle="--", color="grey", label=f"chosen: {chosen_vote}, k = {chosen_k}")
         ax.set(xscale="log", xlabel="k (neighbours)")
         ax.legend()
     fig.tight_layout()

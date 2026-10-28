@@ -37,26 +37,42 @@ def print_test_summary(name):
           f"melanoma recall among auto-decided {'n/a' if recall_auto is None else f'{recall_auto:.3f}'} | "
           f"latency {result['latency_ms_per_image']:.1f} ms/image\n")
 
+def choose_rows(name, test_df, args):
+    """The test rows to show: given IDs, failure cases (--autopsy) or a random sample."""
+    if args.images:
+        rows = test_df[test_df["isic_id"].isin(args.images)]
+        missing = set(args.images) - set(rows["isic_id"])
+        if missing:
+            raise SystemExit(f"not in the test split: {sorted(missing)}")
+        return rows
+    
+    if args.autopsy:
+        # do something here
+
+
 
 def main():
     parser = argparse.ArgumentParser(description="Classify test images with a trained model.")
     parser.add_argument("--model", choices=["baseline", "siamese"], default="siamese")
     parser.add_argument("--show_full_test", default=False)
     parser.add_argument("--images", nargs="+", help="isic_ids from the test split")
+    parser.add_argument("--autopsy", default=False)
     args = parser.parse_args()
     model = args.model
     device = pick_device()
     model = load_model(model, device)
 
-    if args.show_full_test:
-        print_test_summary(model)
-        return
-
-    tuned = load_settings(model)
     df = get_splits(DATA_ROOT, SEED)
     test_df = df[df["split"] == "test"]
     train_df = df[df["split"] == "train"]
     test_samples = sample_split(df, "test", 6, SEED)
+    if args.show_full_test:
+        print_test_summary(model)
+        return
+    if args.images:
+        test_samples = choose_rows(args.model, test_df, args)
+
+    tuned = load_settings(model)
     print(f"Running trained {model} model at threshold {tuned["threshold"]},"
           f"temp {tuned["temperature"]} and k {tuned["k"]}") 
     results = test_model(model, device, train_df, test_samples, tuned)
