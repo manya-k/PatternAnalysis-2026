@@ -294,7 +294,7 @@ def save_training_summary(summary, weights_path):
         json.dump(summary, f, indent=2)
     plot_history(summary["history"], os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"))
     peak, device = summary["peak_gpu_memory_gib"], summary["device"]
-    print(f"best val AUROC {summary['best_val_auroc']:.4f} | "
+    print(f"\nbest val AUROC {summary['best_val_auroc']:.3f} | "
           f"total {summary['total_minutes']:.1f} min | peak GPU memory "
           f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device})'}")
 
@@ -323,8 +323,8 @@ def train_epochs(setup, optimizer, val_loader, device):
                     "val_auroc": val["auroc"], "val_accuracy": val["accuracy"],
                     "seconds": time.time() - epoch_start})
         
-        print(f"epoch {epoch} | train loss {train_loss:.4f} | val loss {val['loss']:.4f} | "
-            f"val AUROC {val['auroc']:.4f} | val acc {val['accuracy']:.4f} | {history[-1]['seconds']:.0f}s")
+        print(f"epoch {epoch} | train loss {train_loss:.3f} | val loss {val['loss']:.3f} | "
+            f"val AUROC {val['auroc']:.3f} | val acc {val['accuracy']:.3f} | {history[-1]['seconds']:.0f}s")
             
         if val["auroc"] > best_auroc:
             best_auroc, epochs_since_best = val["auroc"], 0
@@ -343,6 +343,11 @@ def train_epochs(setup, optimizer, val_loader, device):
         "peak_gpu_memory_gib": memory.peak_gib(), "history": history,
     }, weights_path)
     return weights_path
+
+
+def print_heading(title):
+    """A blank line and a heading, so the training / tuning / testing output is easy to scan."""
+    print(f"\n{'=' * 20} {title} {'=' * 20}\n")
 
 
 def main():
@@ -369,6 +374,7 @@ def main():
 
         model = setup["model"]
         optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+        print_heading(f"TRAINING {MODEL_CHOICE}")
         print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
               f"{setup['details']} | parameters {count_parameters(model):,}")
         weights_path = train_epochs(setup, optimizer, val_loader, device)
@@ -428,7 +434,7 @@ def handle_baseline_eval(model, val_loader, result, device):
     labels = val_labels.numpy()
     ece_before, _ = calibration(*confidence_and_correct(labels, melanoma_probability_from_logits(val_logits).numpy()))
     ece_after, _ = calibration(*confidence_and_correct(labels, val_probs.numpy()))
-    print(f"temperature T = {temperature:} | val ECE {ece_before:} (T = 1) -> {ece_after:} (tuned)")
+    print(f"temperature T = {temperature:.3f} | val ECE {ece_before:.3f} (T = 1) -> {ece_after:.3f} (tuned)")
 
     result["temperature"] = temperature
     result["val_ece_before_temperature"], result["val_ece_after_temperature"] = ece_before, ece_after
@@ -449,14 +455,14 @@ def handle_siamese_eval(model, val_loader, result, device, train_df):
             "val_aurc": aurc,
             "val_auroc": float(roc_auc_score(val_labels, probs)),
         }
-        print(f"k {k:} | val AURC {k_scores[k]['val_aurc']:.4f} | val AUROC {k_scores[k]['val_auroc']:.4f} ")
+        print(f"k {k:>3} | val AURC {k_scores[k]['val_aurc']:.3f} | val AUROC {k_scores[k]['val_auroc']:.3f}")
 
     best_k = min(k_scores, key=lambda k: k_scores[k]["val_aurc"])
     # Before/after: K is the k used during training to pick the best epoch.
     if K in k_scores:
-        print(f"k {K} (training) -> {best_k} (tuned) | "
-              f"val AURC {k_scores[K]['val_aurc']:.4f} -> {k_scores[best_k]['val_aurc']:.4f} | "
-              f"val AUROC {k_scores[K]['val_auroc']:.4f} -> {k_scores[best_k]['val_auroc']:.4f}")
+        print(f"\nk {K} (training) -> {best_k} (tuned) | "
+              f"val AURC {k_scores[K]['val_aurc']:.3f} -> {k_scores[best_k]['val_aurc']:.3f} | "
+              f"val AUROC {k_scores[K]['val_auroc']:.3f} -> {k_scores[best_k]['val_auroc']:.3f}")
     
     plot_k_tuning(k_scores, best_k, os.path.join(OUT_DIR, "siamese_k_tuning.png"))
     result["k"], result["k_scores"] = best_k, k_scores
@@ -465,6 +471,7 @@ def handle_siamese_eval(model, val_loader, result, device, train_df):
 
 
 def tune_model(model, device, train_df, val_loader):
+    print_heading(f"VALIDATION TUNING ({MODEL_CHOICE})")
     result = {}
     start = time.time()
     if MODEL_CHOICE == "baseline":
@@ -480,7 +487,9 @@ def tune_model(model, device, train_df, val_loader):
     #check for threshbhold, k, r
     threshold = choose_threshold(labels, probs)
     result["reject_rule_validation"] = apply_reject_rule(labels, probs, threshold)
-    print(result)
+    reject = result["reject_rule_validation"]
+    threshold_text = "none (refer every case)" if reject["threshold"] is None else f"{reject['threshold']:.3f}"
+    print(f"\nreject threshold {threshold_text} | val referred {reject['referred']:.1%}")
 
     # Save the validation-tuned settings so the test step and predict.py use the tuned k,
     # temperature and threshold rather than the defaults the model was trained with.
@@ -554,6 +563,7 @@ def results_by_source(sources, labels, probs, threshold):
 
 
 def test_model(model, device, train_df, test_df, tuned):
+    print_heading(f"TESTING {MODEL_CHOICE}")
     test_dataset = LesionDataset(test_df, "test")
     labels, probs, predict_one = test_scores(model, device, train_df, loader(test_dataset), tuned)
     confidence, correct = confidence_and_correct(labels, probs)
@@ -585,16 +595,18 @@ def test_model(model, device, train_df, test_df, tuned):
     ].to_csv(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_test_predictions.csv"), index=False)
 
     d, reject = result["discrimination"], result["reject_rule"]
-    print(f"TEST {MODEL_CHOICE} | acc {d['accuracy']: } | AUROC {d['auroc']:} | PR-AUC {d['pr_auc']:} | "
-          f"macro-F1 {d['macro_f1']: } | melanoma recall {d['recall_melanoma']:}")
-    print(f"TEST {MODEL_CHOICE} | ECE {ece:} | AURC {test_aurc:} | referred {reject['referred']:.1%} | "
-          f"melanoma recall among auto-decided {reject['melanoma_recall_auto_decided']} | "
-          f"latency {result['latency_ms_per_image']:.} ms/image")
+    recall_auto = reject["melanoma_recall_auto_decided"]
+    print(f"discrimination | acc {d['accuracy']:.3f} | AUROC {d['auroc']:.3f} | PR-AUC {d['pr_auc']:.3f} | "
+          f"macro-F1 {d['macro_f1']:.3f} | melanoma recall {d['recall_melanoma']:.3f}")
+    print(f"confidence     | ECE {ece:.3f} | AURC {test_aurc:.3f}")
+    print(f"reject rule    | referred {reject['referred']:.1%} | melanoma recall among auto-decided "
+          f"{'n/a (nothing auto-decided)' if recall_auto is None else f'{recall_auto:.3f}'}")
+    print(f"resources      | latency {result['latency_ms_per_image']:.1f} ms/image")
     return result
 
 
 def plot_test_comparison():
-    paths = []
+    paths = {}
     for name in ("baseline", "siamese"):
         paths[name] = os.path.join(OUT_DIR, f"{name}_test_predictions.csv")
     
