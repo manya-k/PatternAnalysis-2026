@@ -2,7 +2,32 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-N_BINS = 15 
+import torch
+from sklearn.metrics import (average_precision_score, confusion_matrix,
+                             precision_recall_fscore_support, roc_auc_score)
+
+N_BINS = 15            # bins for the expected calibration error
+LATENCY_IMAGES = 50    # images timed one at a time for the latency measurement
+
+
+
+def discrimination_metrics(labels, probs):
+    """Standard metrics at the 0.5 decision threshold, plus threshold-free AUROC/PR-AUC."""
+    preds = (probs >= 0.5).astype(int)
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, labels=[0, 1], zero_division=0)
+    both_classes = len(np.unique(labels)) == 2
+    return {
+        "n": int(len(labels)),
+        "melanoma": int(labels.sum()),
+        "accuracy": float((preds == labels).mean()),
+        "precision_benign": float(precision[0]), "recall_benign (specificity)": float(recall[0]),
+        "precision_melanoma": float(precision[1]), "recall_melanoma (sensitivity)": float(recall[1]),
+        "macro_f1": float(f1.mean()),
+        "auroc": float(roc_auc_score(labels, probs)) if both_classes else None,
+        "pr_auc": float(average_precision_score(labels, probs)) if both_classes else None,
+        "confusion_matrix [[TN, FP], [FN, TP]]": confusion_matrix(labels, preds, labels=[0, 1]).tolist(),
+    }
+
 
 def confidence_and_correct(labels, probs):
     """Confidence = probability of the predicted class, max(p, 1 - p), in [0.5, 1]."""

@@ -5,9 +5,14 @@ Train and validate the models, saving the best weights and the training curves.
   --model siamese:  Siamese network trained on image pairs with contrastive loss,
                     validated by k-nearest-neighbour classification against the
                     embedded training images.
+
+After training, the best checkpoint is tuned on validation (k for the Siamese model,
+temperature for the baseline, reject threshold for both) and then tested once on the test split.
+
 Usage example:
     python train.py --model baseline
     python train.py --model siamese
+    python train.py --model siamese --test_only 
 """
 
 import argparse
@@ -25,10 +30,11 @@ from sklearn.metrics import roc_auc_score
 from torch import nn
 from torch.utils.data import DataLoader
 
-from dataset import LesionDataset, PairDataset, build_transforms, get_splits
+from dataset import ID_SOURCES, LesionDataset, PairDataset, build_transforms, get_splits
 from modules import BaselineClassifier, ContrastiveLoss, SiameseNet, count_parameters
-from metrics import calibration, confidence_and_correct, plot_k_tuning, risk_coverage
-                    
+from metrics import (calibration, confidence_and_correct, discrimination_metrics, plot_k_tuning,
+                     plot_reliability, plot_risk_coverage, plot_roc_pr, risk_coverage,
+                     single_image_latency_ms)
 
 OUT_DIR = "outputs"
 DATA_ROOT = "data"
@@ -42,11 +48,12 @@ NUM_WORKERS = 4  # for DataLoader
 SEED = 0  # for reproducibility
 MARGIN = 1.0  # for contrastive loss
 K = 5  # for kNN classification of validation images
+TEST = False
 
 RECALL_TARGET = 0.95
 K_CANDIDATES = (3, 5, 10, 15, 20, 25, 30, 50, 75, 100, 150, 200) 
 def parse_args():
-    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN
+    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, TESR
 
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
     parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
@@ -56,11 +63,13 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--margin", type=float, default=MARGIN, help="contrastive loss margin")
+    parser.add_argument("--test_only", action="store_true",
+                        help="skip training: re-test the saved checkpoint with its saved validation settings")
 
     args = parser.parse_args()
-    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN = (
+    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, TEST = (
         args.model, args.epochs, args.batch_size,
-        args.patience, args.num_workers, args.seed, args.margin
+        args.patience, args.num_workers, args.seed, args.margin, args.test_only
     )
 
     return args
@@ -289,7 +298,7 @@ def save_training_summary(summary, weights_path):
           f"total {summary['total_minutes']:.1f} min | peak GPU memory "
           f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device})'}")
 
-def train_epochs(setup, optimizer, val_loader, device, args):
+def train_epochs(setup, optimizer, val_loader, device):
     """Train with early stopping on val AUROC. Returns the path of the best checkpoint."""
     history = []
     weights_path = os.path.join(OUT_DIR, f"{MODEL_CHOICE}_best.pt")
@@ -346,25 +355,37 @@ def main():
     train_set = sample_split(df, "train", None, SEED)
     val_set = sample_split(df, "val", None, SEED)
     test_set = sample_split(df, "test", None, SEED)
-    # each model calls its own train loader as appropriate
-    test_loader = loader(LesionDataset(test_set, "test"))
-    val_loader = loader(LesionDataset(val_set, "val"))
 
-    if MODEL_CHOICE == "baseline":
-        setup = setup_baseline(train_set, device)
+    if args.test_only:
+        model = load_model(MODEL_CHOICE, device)
+        with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_tuned.json")) as f:
+            tuned = json.load(f)
     else:
-        setup = setup_siamese(train_set, val_set, device)
+        val_loader = loader(LesionDataset(val_set, "val"))
+        if MODEL_CHOICE == "baseline":
+            setup = setup_baseline(train_set, device)
+        else:
+            setup = setup_siamese(train_set, val_set, device)
 
-    model = setup["model"]
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
-    print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
-          f"{setup['details']} | parameters {count_parameters(model):,}")
-    
-    weights_path = train_epochs(setup, optimizer, val_loader, device, args)
+        model = setup["model"]
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+        print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
+              f"{setup['details']} | parameters {count_parameters(model):,}")
+        weights_path = train_epochs(setup, optimizer, val_loader, device, args)
 
-    # Tune and test the best checkpoint, not the weights from the last epoch.
-    model.load_state_dict(torch.load(weights_path, map_location=device))
-    tune_model(model, device, train_set, val_loader)
+        # Tune and test the best checkpoint, not the weights from the last epoch.
+        model.load_state_dict(torch.load(weights_path, map_location=device))
+        tuned = tune_model(model, device, train_set, val_loader)
+
+    test_model(model, device, train_set, test_set, tuned)
+
+
+
+def load_model(name, device):
+    """Rebuild the architecture and load the best weights saved by train_epochs."""
+    model = BaselineClassifier(pretrained=False) if name == "baseline" else SiameseNet(pretrained=False)
+    model.load_state_dict(torch.load(os.path.join(OUT_DIR, f"{name}_best.pt"), map_location=device))
+    return model.to(device).eval()
 
 
 def closure(optimizer, logits, log_t, labels):
@@ -500,10 +521,33 @@ def choose_threshold(labels, probs, target_recall=RECALL_TARGET):
     return float("inf")  # no threshold reaches the target: refer every case
 
 
-if __name__ == "__main__":
-    main()
+@torch.no_grad()
+def test_scores(model, device, train_df, test_loader, tuned):
+    model.eval()
+    if MODEL_CHOICE == "baseline":
+        temperature = tuned["temperature"]
+        logits, labels = baseline_logits(model, test_loader, device)
+        probs = melanoma_probability_from_logits(logits, temperature)
+        predict_one = lambda image: melanoma_probability_from_logits(model(image), temperature)
+    else:
+        k = tuned["k"]
+        bank, bank_labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
+        query, labels = embed_all(model, test_loader, device)
+        probs = knn_melanoma_probability(query, bank, bank_labels, k)
+        predict_one = lambda image: knn_melanoma_probability(model.embed(image).cpu(), bank, bank_labels, k)
+    return labels.numpy(), probs.numpy(), predict_one
 
 
+def test_model(model, device, train_df, test_df, tuned):
+    test_dataset = LesionDataset(test_df, "test")
+    labels, probs, predict_one = test_scores(model, device, train_df, loader(test_dataset), tuned)
+    confidence, correct = confidence_and_correct(labels, probs)
+    threshold = tuned["reject_rule_validation"]["threshold"]
+    threshold = float("inf") if threshold is None else threshold 
+    ece, calibration_table = calibration(confidence, correct)
+    _, _, test_aurc = risk_coverage(confidence, correct)
+
+    sources = test_df["id_source"].values
 
 if __name__ == "__main__":
     main()
