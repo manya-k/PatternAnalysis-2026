@@ -213,6 +213,7 @@ if __name__ == "__main__":
     other_images = torch.randn(4, 3, 224, 224)
     with torch.no_grad():
         emb_a, emb_b = siamese(images, other_images)
+        # the below checks are added to demonstrate that the network functions as intended.
         print(f"\nSiameseNet: pair of {tuple(images.shape)} -> embeddings {tuple(emb_a.shape)}, {tuple(emb_b.shape)}")
         print(f"embeddings have length 1: {torch.allclose(emb_a.norm(dim=1), torch.ones(4), atol=1e-5)}")
         print(f"shared weights (embed == forward): {torch.allclose(siamese.embed(images), emb_a, atol=1e-5)}")

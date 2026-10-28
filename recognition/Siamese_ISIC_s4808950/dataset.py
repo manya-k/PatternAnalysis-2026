@@ -1,13 +1,25 @@
 """
-This file gets the images ready for training. It has four jobs:
+dataset.py
 
-1. Read the labels.
-2. Split the images into train, validation and test without letting a patient leak between them.
-3. Prepare each image for the network.
-4. Serve images either one at a time (for the baseline) or in pairs (for the Siamese model).
+Data loading and preprocessing for the ISIC melanoma Siamese classifier (COMP3710).
+
+This file gets the images ready for training. It has five jobs:
+
+1. Read the labels and work out what kind of patient ID each image has.
+2. Remove exact duplicate images, found by file hash, before splitting.
+3. Split the images into train, validation and test without letting a patient leak
+   between them, and check the result (including near-duplicates across splits).
+4. Prepare each image for the network (augmentation for training, normalisation for all).
+5. Serve images either one at a time (baseline, kNN bank, evaluation) or in pairs
+   (Siamese training).
+
+Run it directly to create (or load) the split and print the data audit:
+
+    python dataset.py --data_root data
 """
 
 import argparse
+import hashlib
 import os
 
 import pandas as pd
@@ -26,7 +38,7 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 IMAGE_SIZE = 224
 
-# 20 folds: 3 for test, 3 for validation, 14 for training -> 70/15/15.
+# 20 folds: 3 for test, 3 for validation, 14 for training, giving 70/15/15.
 N_FOLDS = 20
 TEST_FOLDS = range(0, 3)
 VAL_FOLDS = range(3, 6)
@@ -37,17 +49,18 @@ ID_SOURCES = ("IP", "HAM", "dummy")
 
 def load_metadata(data_root):
     """
-    Load the metadata CSV and add columns for data processing.
+    Load the metadata CSV and add the columns used by the rest of the project.
+
     Args:
-        data_root: path to the directory containing the metadata CSV and the image subdirectory.
+        data_root (str): Directory containing the metadata CSV and the image folder.
+
     Returns:
-        A pandas DataFrame with the following columns:
-            - isic_id: the unique identifier for each image.
-            - patient_id: patient, lesion or placeholder identifier (see id_source).
-            - target: 0 for benign, 1 for malignant.
-            - id_source: "IP" (true ISIC 2020 patient ID), "HAM" (HAM10000 lesion ID,
-              not a patient) or "dummy" (placeholder, no ID available).
-            - path: full path to the image file.
+        pd.DataFrame: One row per image with the columns isic_id, patient_id, target
+            (0 benign, 1 melanoma), id_source ("IP" true ISIC 2020 patient ID, "HAM"
+            HAM10000 lesion ID, "dummy" placeholder with no ID) and path (image file).
+
+    Raises:
+        ValueError: If a patient_id has a prefix other than IP, HAM or dummy.
     """
     df = pd.read_csv(os.path.join(data_root, METADATA_FILE))
     df["target"] = df["target"].astype(int)
@@ -64,9 +77,16 @@ def load_metadata(data_root):
     return df
 
 
-
 def build_transforms(train):
-    """Training augmentation, or deterministic preprocessing for val/test/inference."""
+    """
+    Image preprocessing: random augmentation for training, or a fixed pipeline otherwise.
+
+    Args:
+        train (bool): True for the training augmentation, False for val/test/inference.
+
+    Returns:
+        transforms.Compose: Maps a PIL image to a normalised [3, 224, 224] tensor.
+    """
     normalize = transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
     if not train:
         return transforms.Compose([transforms.ToTensor(), normalize])
@@ -88,8 +108,14 @@ class LesionDataset(Dataset):
     Single images from one split.
 
     Used to train the baseline, to embed the Siamese reference bank and for evaluation.
-    Returns (image, target, row) where ``row`` indexes ``self.df`` so predictions can be
-    traced back to an ``isic_id`` and ID type for failure analysis.
+    Each item also returns its row number, so a prediction can be traced back to its
+    isic_id and ID source in the failure analysis.
+
+    Args:
+        df (pd.DataFrame): Split table from get_splits.
+        split (str): "train", "val" or "test"; only rows of this split are used.
+        transform (callable, optional): Image transform. Defaults to the fixed
+            (non-augmented) preprocessing.
     """
 
     def __init__(self, df, split, transform=None):
@@ -97,14 +123,31 @@ class LesionDataset(Dataset):
         self.transform = transform or build_transforms(train=False)
 
     def __len__(self):
+        """
+        Returns:
+            int: Number of images in the split.
+        """
         return len(self.df)
 
     def __getitem__(self, i):
+        """
+        Load and preprocess one image.
+
+        Args:
+            i (int): Row number within this split.
+
+        Returns:
+            tuple: (image tensor [3, 224, 224], target 0 or 1, row number i).
+        """
         image = Image.open(self.df.at[i, "path"]).convert("RGB")
         return self.transform(image), int(self.df.at[i, "target"]), i
 
     @property
     def targets(self):
+        """
+        Returns:
+            torch.Tensor: The label of every image in the split, in row order.
+        """
         return torch.tensor(self.df["target"].values)
 
 
@@ -115,12 +158,18 @@ class PairDataset(Dataset):
     Each item picks an anchor class with equal probability (so malignant anchors are
     oversampled relative to their 21.5% share), then a same-class or different-class
     partner with equal probability. The four pair types (mal-mal, mal-ben, ben-ben,
-    ben-mal) each make up ~25% of an epoch.
+    ben-mal) each make up about 25% of an epoch.
 
-    Pairs are random but reproducible: item ``i`` in epoch ``e`` is always the same pair.
-    Call ``set_epoch(e)`` at the start of each epoch to draw fresh pairs.
+    Pairs are random but reproducible: item i in epoch e is always the same pair.
+    Call set_epoch(e) at the start of each epoch to draw fresh pairs.
 
-    Returns (image_a, image_b, same) where ``same`` is 1.0 for a same-class pair.
+    Args:
+        df (pd.DataFrame): Split table from get_splits.
+        split (str): The split to draw both images of every pair from.
+        pairs_per_epoch (int, optional): Pairs per epoch. Defaults to one per image.
+        transform (callable, optional): Image transform. Defaults to the training
+            augmentation.
+        seed (int): Base seed for drawing pairs.
     """
 
     def __init__(self, df, split, pairs_per_epoch=None, transform=None, seed=0):
@@ -148,23 +197,50 @@ class PairDataset(Dataset):
         self.epoch = 0
 
     def set_epoch(self, epoch):
-        """Change the epoch so that the next pass draws a fresh set of pairs."""
+        """
+        Change the epoch so that the next pass draws a fresh set of pairs.
+
+        Args:
+            epoch (int): The epoch number about to start.
+        """
         self.epoch = epoch
 
     def __len__(self):
+        """
+        Returns:
+            int: Number of pairs per epoch.
+        """
         return self.pairs_per_epoch
 
     def _random_row(self, cls, g):
-        """A random row number of an image with class `cls`, using generator `g`."""
+        """
+        Pick a random image of one class.
+
+        Args:
+            cls (int): 0 for benign, 1 for melanoma.
+            g (torch.Generator): Random generator for this item.
+
+        Returns:
+            int: Row number of the chosen image.
+        """
         rows = self.rows_by_class[cls]
         pick = torch.randint(len(rows), (1,), generator=g)
         return int(rows[pick])
 
     def __getitem__(self, i):
+        """
+        Build pair number i of the current epoch.
+
+        Args:
+            i (int): Pair index within the epoch.
+
+        Returns:
+            tuple: (image_a, image_b, same) where same is 1.0 for a same-class pair
+                and 0.0 otherwise.
+        """
         # Seeding per item (not per worker) keeps pairs identical across num_workers settings.
         g = torch.Generator().manual_seed(self.seed * 1_000_003 + self.epoch * 10_000_019 + i)
-        # choose the class first, then whether the partner is the same class or not, then pick two images.
-        # to enhance the learning
+        # Choose the anchor class first, then whether the partner has the same class.
         anchor_cls = int(torch.randint(2, (1,), generator=g))
         same = bool(torch.randint(2, (1,), generator=g))
         partner_cls = anchor_cls if same else 1 - anchor_cls
@@ -181,12 +257,22 @@ class PairDataset(Dataset):
 
 def make_splits(df, seed=42):
     """
-    Assign each image to train/val/test so that no patient appears in more than one split.
+    Assign each image to train, val or test so that no patient appears in two splits.
 
     Groups are patient_id values: an IP patient's images stay together, and each HAM or
-    dummy ID is its own group (the few dummy IDs shared by two images keep them together).
-    Strata combine class and ID source, giving six strata:
+    dummy ID is its own group (the few dummy IDs shared by two images keep them
+    together). Strata combine class and ID source, giving six strata:
     {benign, malignant} x {IP, HAM, dummy}.
+
+    Args:
+        df (pd.DataFrame): Metadata from load_metadata, after duplicate removal.
+        seed (int): Seed for shuffling the groups before they are assigned to folds.
+
+    Returns:
+        pd.DataFrame: A copy of df with an added split column.
+
+    Raises:
+        RuntimeError: If any patient ends up in more than one split.
     """
     strata = df["target"].astype(str) + "_" + df["id_source"]
     sgkf = StratifiedGroupKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
@@ -208,8 +294,13 @@ def make_splits(df, seed=42):
 
 def check_no_patient_overlap(df):
     """
-    Check that no patient appears in more than one split.
-    Raises a RuntimeError if any patient appears in more than one split.
+    Check that no patient_id appears in more than one split.
+
+    Args:
+        df (pd.DataFrame): Table with patient_id and split columns.
+
+    Raises:
+        RuntimeError: If any patient_id appears in more than one split.
     """
     splits_per_patient = df.groupby("patient_id")["split"].nunique()
     leaked = splits_per_patient[splits_per_patient > 1]
@@ -222,20 +313,29 @@ def get_splits(data_root, seed=42):
     Load the saved split, or create and save it on first use.
 
     Saving the split guarantees that the baseline and the Siamese model are trained and
-    evaluated on exactly the same images.
+    evaluated on exactly the same images. Exact duplicates are removed in both cases.
+
+    Args:
+        data_root (str): Directory containing the metadata CSV and the images.
+        seed (int): Seed used only when the split is created for the first time.
+
+    Returns:
+        pd.DataFrame: Metadata with a split column ("train", "val" or "test").
+
+    Raises:
+        RuntimeError: If the saved split does not cover every image, or if a patient
+            appears in more than one split.
     """
     # The split is saved next to the data so every script reuses it.
     split_file = os.path.join(data_root, SPLIT_FILE)
     df = load_metadata(data_root)
     if os.path.exists(split_file):
         saved = pd.read_csv(split_file)[["isic_id", "split"]]
-        # merge the two csvs to divide the images into train/val/test, checking that every image is covered.
+        # Attach the saved split to each image, checking that every image is covered.
         df = df.merge(saved, on="isic_id", how="left", validate="one_to_one")
         if df["split"].isna().any():
             raise RuntimeError(f"{split_file} does not cover every image; delete it to regenerate")
-        # check that no patient appears in more than one split.
         check_no_patient_overlap(df)
-
     else:
         df = make_splits(df, seed=seed)
         df[["isic_id", "patient_id", "target", "id_source", "split"]].to_csv(split_file, index=False)
@@ -243,7 +343,13 @@ def get_splits(data_root, seed=42):
 
 
 def report_splits(df):
-    """report ID-source counts and per-split statistics used in the README data audit."""
+    """
+    Print the data audit used in the README: ID-source counts, per-split statistics,
+    patient overlap and near-duplicates across splits.
+
+    Args:
+        df (pd.DataFrame): Split table from get_splits.
+    """
     for source, part in df.groupby("id_source"):
         print(f"{source:>5}: {len(part):>6} images, {part['patient_id'].nunique():>6} unique IDs, "
               f"malignant {part['target'].mean():.1%}")
@@ -264,7 +370,7 @@ def report_splits(df):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create (or load) and report the patient-level split.")
     parser.add_argument("--data_root", default="data")
-    # seed to shuffle the patient IDs before splitting
+    # Seed to shuffle the patient IDs before splitting (only used when creating the split).
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     report_splits(get_splits(args.data_root, seed=args.seed))
