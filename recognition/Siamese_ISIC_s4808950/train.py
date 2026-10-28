@@ -538,6 +538,22 @@ def test_scores(model, device, train_df, test_loader, tuned):
     return labels.numpy(), probs.numpy(), predict_one
 
 
+def results_by_source(sources, labels, probs, threshold):
+    """
+    Discrimination and reject-rule results for each ID source (IP / HAM / dummy) separately,
+    to check whether performance depends on the data source (README risk 2).
+    """
+    results = {}
+    for source in ID_SOURCES:
+        mask = sources == source  # True for the test images from this source
+        if mask.any():
+            results[source] = {
+                "discrimination": discrimination_metrics(labels[mask], probs[mask]),
+                "reject_rule": apply_reject_rule(labels[mask], probs[mask], threshold),
+            }
+    return results
+
+
 def test_model(model, device, train_df, test_df, tuned):
     test_dataset = LesionDataset(test_df, "test")
     labels, probs, predict_one = test_scores(model, device, train_df, loader(test_dataset), tuned)
@@ -548,14 +564,40 @@ def test_model(model, device, train_df, test_df, tuned):
     _, _, test_aurc = risk_coverage(confidence, correct)
 
     sources = test_df["id_source"].values
+    result = {
+        "model": MODEL_CHOICE, "k": tuned.get("k"), "temperature": tuned.get("temperature"),
+        "discrimination": discrimination_metrics(labels, probs),
+        "confidence_auroc": float(roc_auc_score(correct, confidence)) if 0 < correct.mean() < 1 else None,
+        "ece": ece, 
+        "calibration_table": calibration_table, 
+        "aurc": test_aurc,
+        "reject_rule": apply_reject_rule(labels, probs, threshold),
+        "latency_ms_per_image": single_image_latency_ms(predict_one, test_dataset, device),
+        "by_source": results_by_source(sources, labels, probs, threshold),
+    }
+    with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_test_results.json"), "w") as f:
+        json.dump(result, f, indent=2)
+
+    auto = confidence >= threshold
+    test_df.assign(prob_melanoma=probs, predicted=(probs >= 0.5).astype(int), confidence=confidence,
+                   correct=correct, referred=~auto)[
+        ["isic_id", "patient_id", "id_source", "target", "prob_melanoma", "predicted", "confidence",
+         "correct", "referred"]
+    ].to_csv(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_test_predictions.csv"), index=False)
+
+    d, reject = result["discrimination"], result["reject_rule"]
+    print(f"TEST {MODEL_CHOICE} | acc {d['accuracy']: } | AUROC {d['auroc']:} | PR-AUC {d['pr_auc']:} | "
+          f"macro-F1 {d['macro_f1']: } | melanoma recall {d['recall_melanoma']:}")
+    print(f"TEST {MODEL_CHOICE} | ECE {ece:} | AURC {test_aurc:} | referred {reject['referred']:.1%} | "
+          f"melanoma recall among auto-decided {reject['melanoma_recall_auto_decided']} | "
+          f"latency {result['latency_ms_per_image']:.} ms/image")
+    return result
 
 if __name__ == "__main__":
     main()
 
 """
 things remaining in this file:
-1. obv the test code
-2. ece - callibration error 
-3. and also discrimiation and all the plots 
+3. and all the plots 
 need to organise the code file ong
 """

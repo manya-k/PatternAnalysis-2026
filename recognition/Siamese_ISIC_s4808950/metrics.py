@@ -1,3 +1,5 @@
+import time
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -20,8 +22,8 @@ def discrimination_metrics(labels, probs):
         "n": int(len(labels)),
         "melanoma": int(labels.sum()),
         "accuracy": float((preds == labels).mean()),
-        "precision_benign": float(precision[0]), "recall_benign (specificity)": float(recall[0]),
-        "precision_melanoma": float(precision[1]), "recall_melanoma (sensitivity)": float(recall[1]),
+        "precision_benign": float(precision[0]), "recall_benign": float(recall[0]),
+        "precision_melanoma": float(precision[1]), "recall_melanoma": float(recall[1]),
         "macro_f1": float(f1.mean()),
         "auroc": float(roc_auc_score(labels, probs)) if both_classes else None,
         "pr_auc": float(average_precision_score(labels, probs)) if both_classes else None,
@@ -67,6 +69,32 @@ def risk_coverage(confidence, correct):
     group_end = np.minimum.accumulate(np.where(last_of_group, np.arange(n), n)[::-1])[::-1]
     risk = risk[group_end]
     return coverage, risk, float(risk.mean())
+
+
+def synchronize(device):
+    """Wait for queued GPU work to finish so timings are real."""
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
+@torch.no_grad()
+def single_image_latency_ms(predict_one, dataset, device):
+    """
+    Median time to classify one image (batch size 1). predict_one(image) runs the whole
+    prediction, so for the Siamese model it should include the kNN search.
+    """
+    times = []
+    for i in range(min(LATENCY_IMAGES + 5, len(dataset))):
+        image = dataset[i][0].unsqueeze(0).to(device)
+        synchronize(device)
+        start = time.perf_counter()
+        predict_one(image)
+        synchronize(device)
+        if i >= 5:  # skip warm-up iterations
+            times.append((time.perf_counter() - start) * 1000)
+    return float(np.median(times))
 
 
 def plot_k_tuning(k_scores, chosen_k, path):
