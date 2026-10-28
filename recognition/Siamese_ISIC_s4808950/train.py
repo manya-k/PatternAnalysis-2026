@@ -65,6 +65,8 @@ def parse_args():
     parser.add_argument("--margin", type=float, default=MARGIN, help="contrastive loss margin")
     parser.add_argument("--test_only", action="store_true",
                         help="skip training: re-test the saved checkpoint with its saved validation settings")
+    parser.add_argument("--skip_training", action="store_true",
+                        help="skip training: re-tune the saved checkpoint on validation, then test it")
 
     args = parser.parse_args()
     MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, TEST = (
@@ -202,18 +204,28 @@ def embed_all(model, loader, device):
     return torch.cat(embeddings), torch.cat(labels)
 
 
-def knn_melanoma_probability(query, bank, bank_labels, k):
+def knn_melanoma_probability(query, bank, bank_labels, k, melanoma_weight=1.0):
     """
     Distance-weighted kNN: for each query embedding, the weighted share of its k nearest
     reference embeddings that are melanoma. Closer neighbours count more (weight 1/d).
+
+    melanoma_weight multiplies the vote of every melanoma neighbour. With
+    balanced_melanoma_weight() both classes count equally, like the baseline's
+    class-weighted loss; with 1.0 the ~79% benign bank pulls ambiguous cases towards benign.
 
     Returns a score in [0, 1] per query, used like the baseline's softmax probability.
     """
     distances = torch.cdist(query, bank)                         # [Q, N]
     nearest_d, nearest_i = distances.topk(k, dim=1, largest=False)
-    weights = 1.0 / (nearest_d + 1e-6)
     is_melanoma = bank_labels[nearest_i].float()                 # [Q, k]
+    weights = 1.0 / (nearest_d + 1e-6) * (1 + (melanoma_weight - 1) * is_melanoma)
     return (weights * is_melanoma).sum(dim=1) / weights.sum(dim=1)
+
+
+def balanced_melanoma_weight(bank_labels):
+    """Melanoma vote weight that makes both classes count equally: n_benign / n_melanoma."""
+    n_melanoma = int(bank_labels.sum())
+    return (len(bank_labels) - n_melanoma) / n_melanoma
 
 
 @torch.no_grad()
@@ -365,6 +377,9 @@ def main():
         model = load_model(MODEL_CHOICE, device)
         with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_tuned.json")) as f:
             tuned = json.load(f)
+    elif args.skip_training:
+        model = load_model(MODEL_CHOICE, device)
+        tuned = tune_model(model, device, train_set, loader(LesionDataset(val_set, "val")))
     else:
         val_loader = loader(LesionDataset(val_set, "val"))
         if MODEL_CHOICE == "baseline":
@@ -442,31 +457,50 @@ def handle_baseline_eval(model, val_loader, result, device):
 
 
 def handle_siamese_eval(model, val_loader, result, device, train_df):
+    """
+    Tune the kNN on validation: k, and whether the vote is plain or class-balanced.
 
+    The chosen setting refers the fewest val cases while still meeting the reject rule's
+    melanoma-recall target (README criterion 4); ties are broken by AURC. AURC alone would
+    always prefer the plain vote, which never meets the recall target (every case referred).
+    """
     bank, bank_labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
     val_embeddings, val_labels = embed_all(model, val_loader, device)
-    # K in KNN Tunning
-    k_scores = {}
-    for k in K_CANDIDATES:
-        probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, k)
-        confidence, correct = confidence_and_correct(val_labels.numpy(), probs.numpy())
-        _, _, aurc = risk_coverage(confidence, correct)
-        k_scores[k] = {
-            "val_aurc": aurc,
-            "val_auroc": float(roc_auc_score(val_labels, probs)),
-        }
-        print(f"k {k:>3} | val AURC {k_scores[k]['val_aurc']:.3f} | val AUROC {k_scores[k]['val_auroc']:.3f}")
+    labels = val_labels.numpy()
+    votes = {"plain": 1.0, "balanced": balanced_melanoma_weight(bank_labels)}
 
-    best_k = min(k_scores, key=lambda k: k_scores[k]["val_aurc"])
-    # Before/after: K is the k used during training to pick the best epoch.
-    if K in k_scores:
-        print(f"\nk {K} (training) -> {best_k} (tuned) | "
-              f"val AURC {k_scores[K]['val_aurc']:.3f} -> {k_scores[best_k]['val_aurc']:.3f} | "
-              f"val AUROC {k_scores[K]['val_auroc']:.3f} -> {k_scores[best_k]['val_auroc']:.3f}")
-    
-    plot_k_tuning(k_scores, best_k, os.path.join(OUT_DIR, "siamese_k_tuning.png"))
-    result["k"], result["k_scores"] = best_k, k_scores
-    val_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, best_k)
+    k_scores = {vote: {} for vote in votes}
+    for vote, melanoma_weight in votes.items():
+        for k in K_CANDIDATES:
+            probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, k, melanoma_weight).numpy()
+            confidence, correct = confidence_and_correct(labels, probs)
+            _, _, aurc = risk_coverage(confidence, correct)
+            reject = apply_reject_rule(labels, probs, choose_threshold(labels, probs))
+            k_scores[vote][k] = {
+                "val_aurc": aurc,
+                "val_auroc": float(roc_auc_score(labels, probs)),
+                "val_melanoma_recall": float((probs[labels == 1] >= 0.5).mean()),
+                "val_referred": reject["referred"],
+            }
+            print(f"{vote:>8} vote | k {k:>3} | val AURC {aurc:.3f} | val AUROC {k_scores[vote][k]['val_auroc']:.3f} | "
+                  f"melanoma recall {k_scores[vote][k]['val_melanoma_recall']:.3f} | referred {reject['referred']:.1%}")
+
+    def selection_key(vote_and_k):
+        scores = k_scores[vote_and_k[0]][vote_and_k[1]]
+        return scores["val_referred"], scores["val_aurc"]
+
+    best_vote, best_k = min(((vote, k) for vote in votes for k in K_CANDIDATES), key=selection_key)
+    # Before/after: K with a plain vote is what was used during training to pick the best epoch.
+    if K in k_scores["plain"]:
+        before, after = k_scores["plain"][K], k_scores[best_vote][best_k]
+        print(f"\nplain vote, k {K} (training) -> {best_vote} vote, k {best_k} (tuned) | "
+              f"melanoma recall {before['val_melanoma_recall']:.3f} -> {after['val_melanoma_recall']:.3f} | "
+              f"referred {before['val_referred']:.1%} -> {after['val_referred']:.1%}")
+
+    plot_k_tuning(k_scores, best_k, best_vote, os.path.join(OUT_DIR, "siamese_k_tuning.png"))
+    result["k"], result["vote"], result["melanoma_weight"] = best_k, best_vote, votes[best_vote]
+    result["k_scores"] = k_scores
+    val_probs = knn_melanoma_probability(val_embeddings, bank, bank_labels, best_k, votes[best_vote])
     return val_probs, val_labels, result
 
 
@@ -538,11 +572,12 @@ def test_scores(model, device, train_df, test_loader, tuned):
         probs = melanoma_probability_from_logits(logits, temperature)
         predict_one = lambda image: melanoma_probability_from_logits(model(image), temperature)
     else:
-        k = tuned["k"]
+        k, melanoma_weight = tuned["k"], tuned.get("melanoma_weight", 1.0)
         bank, bank_labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
         query, labels = embed_all(model, test_loader, device)
-        probs = knn_melanoma_probability(query, bank, bank_labels, k)
-        predict_one = lambda image: knn_melanoma_probability(model.embed(image).cpu(), bank, bank_labels, k)
+        probs = knn_melanoma_probability(query, bank, bank_labels, k, melanoma_weight)
+        predict_one = lambda image: knn_melanoma_probability(model.embed(image).cpu(), bank, bank_labels,
+                                                             k, melanoma_weight)
     return labels.numpy(), probs.numpy(), predict_one
 
 
