@@ -228,6 +228,22 @@ def balanced_melanoma_weight(bank_labels):
     return (len(bank_labels) - n_melanoma) / n_melanoma
 
 
+def training_bank(model, train_df, device):
+    weights_time = os.path.getmtime(os.path.join(OUT_DIR, "siamese_best.pt"))
+    cache_path = os.path.join(OUT_DIR, "siamese_bank.pt")
+    if os.path.exists(cache_path):
+        try:
+            cache = torch.load(cache_path)
+        except Exception:  # e.g. an old cache in a different format: rebuild it
+            cache = {}
+        if cache.get("weights_time") == weights_time and len(cache["labels"]) == len(train_df):
+            return cache["embeddings"], cache["labels"]
+    print("embedding the training images (reference bank) ...")
+    embeddings, labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
+    torch.save({"weights_time": weights_time, "embeddings": embeddings, "labels": labels}, cache_path)
+    return embeddings, labels
+
+
 @torch.no_grad()
 def evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, device, k):
     """
@@ -464,7 +480,7 @@ def handle_siamese_eval(model, val_loader, result, device, train_df):
     melanoma-recall target (README criterion 4); ties are broken by AURC. AURC alone would
     always prefer the plain vote, which never meets the recall target (every case referred).
     """
-    bank, bank_labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
+    bank, bank_labels = training_bank(model, train_df, device)
     val_embeddings, val_labels = embed_all(model, val_loader, device)
     labels = val_labels.numpy()
     votes = {"plain": 1.0, "balanced": balanced_melanoma_weight(bank_labels)}
@@ -564,21 +580,24 @@ def choose_threshold(labels, probs, target_recall=RECALL_TARGET):
 
 
 @torch.no_grad()
-def test_scores(model, device, train_df, test_loader, tuned):
+def melanoma_scores(name, model, data_loader, device, tuned, train_df):
     model.eval()
-    if MODEL_CHOICE == "baseline":
-        temperature = tuned["temperature"]
-        logits, labels = baseline_logits(model, test_loader, device)
-        probs = melanoma_probability_from_logits(logits, temperature)
-        predict_one = lambda image: melanoma_probability_from_logits(model(image), temperature)
+    if name == "baseline":
+        logits, labels = baseline_logits(model, data_loader, device)
+        probs = melanoma_probability_from_logits(logits, tuned["temperature"])
     else:
-        k, melanoma_weight = tuned["k"], tuned.get("melanoma_weight", 1.0)
-        bank, bank_labels = embed_all(model, loader(LesionDataset(train_df, "train")), device)
-        query, labels = embed_all(model, test_loader, device)
-        probs = knn_melanoma_probability(query, bank, bank_labels, k, melanoma_weight)
-        predict_one = lambda image: knn_melanoma_probability(model.embed(image).cpu(), bank, bank_labels,
-                                                             k, melanoma_weight)
-    return labels.numpy(), probs.numpy(), predict_one
+        bank, bank_labels = training_bank(model, train_df, device)
+        query, labels = embed_all(model, data_loader, device)
+        probs = knn_melanoma_probability(query, bank, bank_labels, tuned["k"], tuned.get("melanoma_weight", 1.0))
+    return labels.numpy(), probs.numpy()
+
+
+def one_image_predictor(name, model, device, tuned, train_df):
+    if name == "baseline":
+        return lambda image: melanoma_probability_from_logits(model(image), tuned["temperature"])
+    bank, bank_labels = training_bank(model, train_df, device)
+    k, melanoma_weight = tuned["k"], tuned.get("melanoma_weight", 1.0)
+    return lambda image: knn_melanoma_probability(model.embed(image).cpu(), bank, bank_labels, k, melanoma_weight)
 
 
 def results_by_source(sources, labels, probs, threshold):
@@ -600,7 +619,8 @@ def results_by_source(sources, labels, probs, threshold):
 def test_model(model, device, train_df, test_df, tuned):
     print_heading(f"TESTING {MODEL_CHOICE}")
     test_dataset = LesionDataset(test_df, "test")
-    labels, probs, predict_one = test_scores(model, device, train_df, loader(test_dataset), tuned)
+    labels, probs = melanoma_scores(MODEL_CHOICE, model, loader(test_dataset), device, tuned, train_df)
+    predict_one = one_image_predictor(MODEL_CHOICE, model, device, tuned, train_df)
     confidence, correct = confidence_and_correct(labels, probs)
     threshold = tuned["reject_rule_validation"]["threshold"]
     threshold = float("inf") if threshold is None else threshold 
