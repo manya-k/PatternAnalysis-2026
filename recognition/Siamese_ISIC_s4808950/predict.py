@@ -1,23 +1,23 @@
 import argparse
 import os
 import json
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import torch
-from train import (load_model, OUT_DIR, SEED, DATA_ROOT, 
-                   pick_device, sample_split, test_model)
-from dataset import get_splits
+
+from dataset import LesionDataset, get_splits
+from train import (DATA_ROOT, OUT_DIR, SEED, embed_all, load_model, loader, melanoma_scores,
+                   pick_device, sample_split, training_bank)
 
 def load_settings(name):
     path = os.path.join(OUT_DIR, f"{name}_tuned.json")
     if not os.path.exists(path):
         raise SystemExit(f"{path} not found. Requires training")
     with open(path) as f:
-        tuned = json.load(f)
-    return {
-        "threshold": tuned["reject_rule_validation"]["threshold"], 
-        "temperature": tuned.get("temperature", 1.0),
-        "k": tuned.get("k"),
-        "melanoma_weight": tuned.get("melanoma_weight", 1.0),  # Siamese only: 1.0 = plain vote                           
-    }
+        return json.load(f)
+
 
 def print_test_summary(name):
     path = os.path.join(OUT_DIR, f"{name}_test_results.json")
@@ -28,7 +28,7 @@ def print_test_summary(name):
     with open(path) as f:
         result = json.load(f)
     d, reject = result["discrimination"], result["reject_rule"]
-    print(f"{name} on the full test split:")
+    print(f"{name} on the full test split ({d['n']} images):")
     print(f"accuracy {d['accuracy']:.3f} | AUROC {d['auroc']:.3f} | PR-AUC {d['pr_auc']:.3f} | "
           f"macro-F1 {d['macro_f1']:.3f} | melanoma recall {d['recall_melanoma']:.3f}")
     
@@ -45,37 +45,38 @@ def choose_rows(name, test_df, args):
         if missing:
             raise SystemExit(f"not in the test split: {sorted(missing)}")
         return rows
-    
+
     if args.autopsy:
-        # do something here
+        print("hello")
+    return sample_split(test_df, "test", N_RANDOM)
 
 
 
 def main():
     parser = argparse.ArgumentParser(description="Classify test images with a trained model.")
     parser.add_argument("--model", choices=["baseline", "siamese"], default="siamese")
-    parser.add_argument("--show_full_test", default=False)
-    parser.add_argument("--images", nargs="+", help="isic_ids from the test split")
-    parser.add_argument("--autopsy", default=False)
-    args = parser.parse_args()
-    model = args.model
-    device = pick_device()
-    model = load_model(model, device)
+    parser.add_argument("--show_full_test", action="store_true",
+                        help="only print the saved results on the full test split")
 
-    df = get_splits(DATA_ROOT, SEED)
-    test_df = df[df["split"] == "test"]
-    train_df = df[df["split"] == "train"]
-    test_samples = sample_split(df, "test", 6, SEED)
+    parser.add_argument("--images", nargs="+", help="isic_ids from the test split")
+    parser.add_argument("--autopsy", action="store_true", help="show the most confident test errors")
+    args = parser.parse_args()
     if args.show_full_test:
         print_test_summary(model)
         return
-    if args.images:
-        test_samples = choose_rows(args.model, test_df, args)
-
+    device = pick_device()
+    model = load_model(model, device) 
+    df = get_splits(DATA_ROOT)
+    test_df = df[df["split"] == "test"]
+    train_df = df[df["split"] == "train"]
     tuned = load_settings(model)
     print(f"Running trained {model} model at threshold {tuned["threshold"]},"
           f"temp {tuned["temperature"]} and k {tuned["k"]}") 
-    results = test_model(model, device, train_df, test_samples, tuned)
+
+
+    rows = choose_rows(model, test_df, args).reset_index(drop=True)
+    labels, probs = melanoma_scores(args.model, model, loader(LesionDataset(rows, "test")), device, tuned, train_df)
+
 
 if __name__ == "__main__":
     main()
