@@ -1,0 +1,84 @@
+##### python predict.py --model siamese
+Running the trained siamese model: k 25, vote balanced, temperature None, reject threshold 0.764
+
+                   isic_id source      true      pred  p(mel)  conf decision
+              ISIC_0033837  dummy    benign    benign   0.230 0.770     auto
+                           nearest training images: ben 0.15, ben 0.16, ben 0.16, ben 0.17, ben 0.17
+              ISIC_0027612    HAM    benign    benign   0.000 1.000     auto
+                           nearest training images: ben 0.05, ben 0.05, ben 0.05, ben 0.05, ben 0.05
+              ISIC_0033511  dummy    benign  melanoma   0.583 0.583    REFER
+                           nearest training images: ben 0.08, ben 0.08, ben 0.09, mel 0.09, ben 0.10
+              ISIC_0024355  dummy    benign    benign   0.253 0.747    REFER
+                           nearest training images: ben 0.06, ben 0.10, mel 0.14, ben 0.15, ben 0.15
+              ISIC_0031855    HAM    benign    benign   0.000 1.000     auto
+                           nearest training images: ben 0.03, ben 0.03, ben 0.03, ben 0.03, ben 0.03
+              ISIC_0066921  dummy  melanoma  melanoma   1.000 1.000     auto
+                           nearest training images: mel 0.04, mel 0.05, mel 0.05, mel 0.05, mel 0.06
+
+figure -> outputs/predict_siamese.png
+##### python predict.py --model baseline
+Running the trained baseline model: k None, vote None, temperature 1.126033067703247, reject threshold 0.773
+
+                   isic_id source      true      pred  p(mel)  conf decision
+              ISIC_0033837  dummy    benign    benign   0.287 0.713    REFER
+              ISIC_0027612    HAM    benign    benign   0.297 0.703    REFER
+              ISIC_0033511  dummy    benign    benign   0.258 0.742    REFER
+              ISIC_0024355  dummy    benign    benign   0.310 0.690    REFER
+              ISIC_0031855    HAM    benign    benign   0.010 0.990     auto
+              ISIC_0066921  dummy  melanoma  melanoma   0.995 0.995     auto
+
+figure -> outputs/predict_baseline.png
+##### python predict.py --model siamese --autopsy
+Running the trained siamese model: k 25, vote balanced, temperature None, reject threshold 0.764
+
+Errors by ID source (full test split):
+           images  error_rate  missed_melanomas  false_alarms  referred  wrong_but_auto_decided
+id_source                                                                                      
+HAM           386       0.163                17            46     0.238                      24
+IP           1558       0.100                45           111     0.178                      63
+dummy        1609       0.261                64           356     0.334                     202 
+
+                   isic_id source      true      pred  p(mel)  conf decision
+              ISIC_0033603  dummy  melanoma    benign   0.000 1.000     auto
+                           nearest training images: ben 0.10, ben 0.10, ben 0.10, ben 0.11, ben 0.12
+              ISIC_1870415     IP  melanoma    benign   0.000 1.000     auto
+                           nearest training images: ben 0.06, ben 0.07, ben 0.07, ben 0.07, ben 0.07
+              ISIC_4967586     IP  melanoma    benign   0.000 1.000     auto
+                           nearest training images: ben 0.06, ben 0.06, ben 0.06, ben 0.06, ben 0.06
+              ISIC_0070280  dummy    benign  melanoma   0.990 0.990     auto
+                           nearest training images: mel 0.07, mel 0.07, mel 0.08, mel 0.08, mel 0.08
+              ISIC_0065647  dummy    benign  melanoma   0.990 0.990     auto
+                           nearest training images: mel 0.05, mel 0.05, mel 0.05, mel 0.05, mel 0.05
+
+figure -> outputs/autopsy_siamese.png
+##### python predict.py --model baseline --autopsy
+Running the trained baseline model: k None, vote None, temperature 1.126033067703247, reject threshold 0.773
+
+Errors by ID source (full test split):
+           images  error_rate  missed_melanomas  false_alarms  referred  wrong_but_auto_decided
+id_source                                                                                      
+HAM           386       0.142                15            40     0.293                      14
+IP           1558       0.081                41            85     0.228                      39
+dummy        1609       0.245                53           341     0.465                     109 
+
+                   isic_id source      true      pred  p(mel)  conf decision
+              ISIC_5733748     IP  melanoma    benign   0.037 0.963     auto
+              ISIC_7242384     IP  melanoma    benign   0.053 0.947     auto
+              ISIC_3909039     IP  melanoma    benign   0.068 0.932     auto
+              ISIC_3660136     IP    benign  melanoma   0.993 0.993     auto
+              ISIC_1793200     IP    benign  melanoma   0.984 0.984     auto
+
+figure -> outputs/autopsy_baseline.png
+##### python predict.py --model baseline --images ISIC_0033837 ISIC_0066921
+Running the trained baseline model: k None, vote None, temperature 1.126033067703247, reject threshold 0.773
+
+                   isic_id source      true      pred  p(mel)  conf decision
+              ISIC_0033837  dummy    benign    benign   0.287 0.713    REFER
+              ISIC_0066921  dummy  melanoma  melanoma   0.995 0.995     auto
+
+figure -> outputs/predict_baseline.png
+##### python predict.py --model siamese --show_full_test
+siamese on the full test split (3553 images):
+accuracy 0.820 | AUROC 0.909 | PR-AUC 0.781 | macro-F1 0.779 | melanoma recall 0.845
+ECE 0.065 | AURC 0.0615 | referred 25.6% | melanoma recall among auto-decided 0.921 | latency 3.8 ms/image
+

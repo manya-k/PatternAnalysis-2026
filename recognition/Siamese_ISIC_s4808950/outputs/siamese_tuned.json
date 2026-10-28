@@ -1,0 +1,165 @@
+{
+  "k": 25,
+  "vote": "balanced",
+  "melanoma_weight": 3.712646817809342,
+  "k_scores": {
+    "plain": {
+      "3": {
+        "val_aurc": 0.07702784650781302,
+        "val_auroc": 0.8726900437239385,
+        "val_melanoma_recall": 0.7079646017699115,
+        "val_referred": 1.0
+      },
+      "5": {
+        "val_aurc": 0.05704307888148502,
+        "val_auroc": 0.8947268476157882,
+        "val_melanoma_recall": 0.7041719342604298,
+        "val_referred": 1.0
+      },
+      "10": {
+        "val_aurc": 0.041953845572781485,
+        "val_auroc": 0.9101299756934015,
+        "val_melanoma_recall": 0.7003792667509482,
+        "val_referred": 1.0
+      },
+      "15": {
+        "val_aurc": 0.036167379689934415,
+        "val_auroc": 0.9163509020681563,
+        "val_melanoma_recall": 0.683944374209861,
+        "val_referred": 1.0
+      },
+      "20": {
+        "val_aurc": 0.03397233679224741,
+        "val_auroc": 0.9181878662578316,
+        "val_melanoma_recall": 0.6890012642225032,
+        "val_referred": 1.0
+      },
+      "25": {
+        "val_aurc": 0.0336354401460139,
+        "val_auroc": 0.9187261212116978,
+        "val_melanoma_recall": 0.6826801517067004,
+        "val_referred": 1.0
+      },
+      "30": {
+        "val_aurc": 0.033526884867193615,
+        "val_auroc": 0.9186981825928435,
+        "val_melanoma_recall": 0.6864728192161821,
+        "val_referred": 1.0
+      },
+      "50": {
+        "val_aurc": 0.03319761819846259,
+        "val_auroc": 0.9186602035328385,
+        "val_melanoma_recall": 0.6814159292035398,
+        "val_referred": 1.0
+      },
+      "75": {
+        "val_aurc": 0.03319114287893518,
+        "val_auroc": 0.9183635739779704,
+        "val_melanoma_recall": 0.6750948166877371,
+        "val_referred": 1.0
+      },
+      "100": {
+        "val_aurc": 0.03209175896033972,
+        "val_auroc": 0.9193080302575243,
+        "val_melanoma_recall": 0.672566371681416,
+        "val_referred": 1.0
+      },
+      "150": {
+        "val_aurc": 0.03198747566784957,
+        "val_auroc": 0.9191227186371541,
+        "val_melanoma_recall": 0.6788874841972187,
+        "val_referred": 1.0
+      },
+      "200": {
+        "val_aurc": 0.03216188024652334,
+        "val_auroc": 0.9188518449965426,
+        "val_melanoma_recall": 0.6826801517067004,
+        "val_referred": 1.0
+      }
+    },
+    "balanced": {
+      "3": {
+        "val_aurc": 0.08453164695826552,
+        "val_auroc": 0.8726902619943984,
+        "val_melanoma_recall": 0.8634639696586599,
+        "val_referred": 1.0
+      },
+      "5": {
+        "val_aurc": 0.0691931387891934,
+        "val_auroc": 0.8947268476157882,
+        "val_melanoma_recall": 0.8407079646017699,
+        "val_referred": 1.0
+      },
+      "10": {
+        "val_aurc": 0.059907057489014155,
+        "val_auroc": 0.9101299756934015,
+        "val_melanoma_recall": 0.8609355246523388,
+        "val_referred": 1.0
+      },
+      "15": {
+        "val_aurc": 0.057383491637490285,
+        "val_auroc": 0.9163509020681563,
+        "val_melanoma_recall": 0.8761061946902655,
+        "val_referred": 0.2818009221589368
+      },
+      "20": {
+        "val_aurc": 0.05711050898695658,
+        "val_auroc": 0.9181878662578316,
+        "val_melanoma_recall": 0.8761061946902655,
+        "val_referred": 0.322213181448332
+      },
+      "25": {
+        "val_aurc": 0.05768391181806135,
+        "val_auroc": 0.9187261212116978,
+        "val_melanoma_recall": 0.8798988621997471,
+        "val_referred": 0.24762679685381073
+      },
+      "30": {
+        "val_aurc": 0.05828521829123009,
+        "val_auroc": 0.9186981825928435,
+        "val_melanoma_recall": 0.8798988621997471,
+        "val_referred": 0.2758340113913751
+      },
+      "50": {
+        "val_aurc": 0.0585028289155792,
+        "val_auroc": 0.9186602035328385,
+        "val_melanoma_recall": 0.8735777496839444,
+        "val_referred": 0.2872253864930838
+      },
+      "75": {
+        "val_aurc": 0.058587811332622926,
+        "val_auroc": 0.9183635739779704,
+        "val_melanoma_recall": 0.8798988621997471,
+        "val_referred": 0.3208570653647952
+      },
+      "100": {
+        "val_aurc": 0.057420165958675974,
+        "val_auroc": 0.9193080302575243,
+        "val_melanoma_recall": 0.8798988621997471,
+        "val_referred": 0.32248440466503936
+      },
+      "150": {
+        "val_aurc": 0.05720338489040599,
+        "val_auroc": 0.9191227186371541,
+        "val_melanoma_recall": 0.8798988621997471,
+        "val_referred": 0.3691347979387035
+      },
+      "200": {
+        "val_aurc": 0.057296447592235906,
+        "val_auroc": 0.9188518449965426,
+        "val_melanoma_recall": 0.8723135271807838,
+        "val_referred": 0.3349606726335774
+      }
+    }
+  },
+  "scoring_seconds": 68.49027514457703,
+  "reject_rule_validation": {
+    "threshold": 0.7644371390342712,
+    "auto_decided": 0.7523732031461893,
+    "referred": 0.24762679685381073,
+    "accuracy_auto_decided": 0.8882480173035328,
+    "melanoma_recall_auto_decided": 0.9511784511784511,
+    "melanomas_missed_by_automation": 29,
+    "system_melanoma_sensitivity": 0.9633375474083439
+  }
+}

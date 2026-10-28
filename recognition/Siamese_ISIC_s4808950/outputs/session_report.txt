@@ -1,0 +1,195 @@
+SESSION REPORT: AUDIT, FIXES AND FROM-SCRATCH RUN
+Project: recognition/Siamese_ISIC_s4808950
+Date: 2026-10-29 00:55
+Nothing in this session was committed to git.
+
+======================================================================
+1. AUDIT AGAINST THE TASK SHEET (sections 4.1, 5.1, 5.3, 6) AND THE README
+======================================================================
+
+Gaps found, and what was done about each:
+
+1. README acceptance criterion 1 says exact duplicate images, found by file hash, are
+   removed before splitting, and Risk 1 promises a perceptual-hash check for
+   near-duplicates across splits. Neither was implemented.
+   FIX (dataset.py): file_md5 + remove_exact_duplicates (run inside get_splits, before
+   splitting), and difference_hash + near_duplicates_across_splits (reported by
+   python dataset.py).
+
+2. The joint test plots (ROC/PR, reliability diagram, risk-coverage) were never drawn:
+   nothing called plot_test_comparison.
+   FIX (train.py): main() calls plot_test_comparison() after the test step. The plots
+   appear once both models have been tested.
+
+3. predict.py crashed on every run: after the figure was saved it called
+   load_settings(model) with the network instead of its name and read tuned["threshold"],
+   which is not a key of the tuned JSON. Random mode also crashed: sample_split was
+   called without its seed argument.
+   FIX (predict.py): the settings line now reads tuned["reject_rule_validation"]["threshold"]
+   and prints k, vote, temperature and threshold before predicting; sample_split gets
+   SEED; the autopsy error message now says to run train.py; unused import removed.
+
+4. train.py parse_args declared "global ... TESR" but assigned TEST (harmless but wrong).
+   FIX: both removed (the variable was unused).
+
+5. metrics.py had no file header, and risk_coverage and the three plot functions had no
+   docstrings (code commenting is marked).
+   FIX: header and docstrings added.
+
+6. README.md stopped after the feasibility review. Missing: description of the
+   algorithm and problem, how it works, a figure, dependencies with exact versions,
+   reproducibility, usage, example inputs and outputs, pre-processing and split
+   justification, benchmarking against the baseline, resource profiling table, 3-5
+   failure autopsies, manager recommendation, and the subsection titled exactly
+   "Artificial Intelligence Usage Disclosure".
+   FIX: full report written after the run (step 3).
+
+7. README figures must be committed, but outputs/ is gitignored.
+   FIX: figures used in the README are copied to images/ (step 3).
+
+Checked and already fine:
+- modules.py uses no NumPy (PyTorch only), as section 4.1 requires.
+- train.py trains, validates, tests and saves, imports the models from modules.py and
+  the data from dataset.py, and plots losses and metrics per epoch.
+- predict.py loads saved weights, runs inference on test images, prints results and
+  saves figures.
+- Per-class precision and recall, macro-F1, AUROC, PR-AUC, PR curves, peak GPU memory,
+  parameter count and per-image latency are all measured.
+- Siamese network is in the Hard difficulty band.
+
+======================================================================
+2. DOCSTRINGS AND HEADERS (task step 4, code part)
+======================================================================
+dataset.py and modules.py: file header plus Google-style docstrings (brief description,
+Args, Returns, Raises where relevant) on every function, class and method. No "-----"
+underline style, no em or en dashes. Done before the run so the run tests the final code.
+Behaviour is unchanged: the regenerated split is byte-for-byte identical to the old one.
+
+======================================================================
+3. FROM-SCRATCH RUN (task step 2)
+======================================================================
+Old outputs/ and data/splits.csv were moved (not deleted) to:
+/private/tmp/claude-501/-Users-manyakhosla-PatternAnalysis-2026/55d97a2c-9381-4973-8bec-adf4133258a6/scratchpad/old_run/
+
+--- python dataset.py (split recreated from scratch, seed 42) ---
+ID sources: {'IP': 11186, 'dummy': 10794, 'HAM': 2513}
+exact duplicate images (same MD5): 0 removed
+  HAM:   2513 images,   2513 unique IDs, malignant 24.4%
+   IP:  11186 images,   1919 unique IDs, malignant 5.2%
+dummy:  10794 images,  10514 unique IDs, malignant 37.7%
+
+id_source   HAM         IP      dummy      
+target        0    1     0    1     0     1
+split                                      
+test        298   88  1466   92   975   634
+train      1331  425  7510  421  4751  2815
+val         270  101  1629   68   997   622 
+
+ test:   3553 images (14.5%),   2243 ID groups, malignant 22.9%, IP/HAM/dummy 43.9% / 10.9% / 45.3%
+train:  17253 images (70.4%),  10463 ID groups, malignant 21.2%, IP/HAM/dummy 46.0% / 10.2% / 43.9%
+  val:   3687 images (15.1%),   2240 ID groups, malignant 21.5%, IP/HAM/dummy 46.0% / 10.1% / 43.9%
+
+patient IDs in more than one split: 0
+near-duplicate groups (same difference hash) spanning splits: 0 (0 images)
+
+Regenerated data/splits.csv is byte-for-byte identical to the previous one (cmp).
+
+Near-duplicate check note: an 8 x 8 difference hash reported 37 cross-split groups
+(101 images). Visual inspection showed they were different lesions with the same
+coarse layout (small central lesion on plain skin, or the black dermatoscope circle);
+15 groups even mixed benign and melanoma. With a 16 x 16 hash (256 bits) there are no
+duplicate hashes at all, so 16 x 16 is the default and the audit reports 0.
+
+--- python modules.py (self-test) ---
+Using pretrained ResNet-18 backbone.
+BaselineClassifier: input (4, 3, 224, 224) -> logits (4, 2)
+probabilities sum to 1: True
+trainable parameters: 11,177,538
+Using pretrained ResNet-18 backbone.
+
+SiameseNet: pair of (4, 3, 224, 224) -> embeddings (4, 128), (4, 128)
+embeddings have length 1: True
+shared weights (embed == forward): True
+trainable parameters: 11,340,736
+
+ContrastiveLoss (margin 1.0):
+  identical, same class       -> 0.000  (expect 0: already together)
+  far apart, same class       -> 2.000  (expect 2.0 = d^2: pull together)
+  far apart, different class  -> 0.000  (expect 0: beyond the margin)
+  identical, different class  -> 1.000  (expect 1.0 = margin^2: push apart)
+
+--- Training (baseline, then Siamese) ---
+Logs: outputs/train_baseline.log and outputs/train_siamese.log
+(results appended below when the run finishes)
+
+======================================================================
+4. TRAINING, TUNING AND TEST RESULTS (from-scratch run, finished)
+======================================================================
+Full logs: outputs/train_baseline.log, outputs/train_siamese.log, outputs/predict_runs.log
+
+BASELINE
+- 12 epochs (early stopping, patience 5), best val AUROC 0.928 at epoch 7
+- 110 s per epoch; total 29.6 min wall clock, of which about 7.5 min was the laptop
+  sleeping during epoch 8 (560 s instead of 110 s); about 22 min of compute
+- peak GPU memory 1.23 GiB; 11,177,538 parameters
+- tuning: temperature T = 1.126 (val ECE 0.026 -> 0.027); reject threshold 0.773
+  (val referred 32.1%, val auto-decided melanoma recall 0.951)
+- TEST: acc 0.838 | AUROC 0.933 | PR-AUC 0.829 | macro-F1 0.799 | melanoma recall 0.866
+        ECE 0.023 | AURC 0.052 | confidence AUROC 0.810
+        referred 34.3% | melanoma recall among auto-decided 0.958 (531/554) | 23 missed
+        latency 3.0 ms/image
+
+SIAMESE
+- 7 epochs, best val AUROC 0.895 (k = 5 plain vote) at epoch 2
+- 193 s per epoch; total 22.6 min; peak GPU memory 2.24 GiB; 11,340,736 parameters
+- tuning: balanced vote, k = 25 (lowest val referral meeting the 95% recall target);
+  plain vote refers 100% at every k; reject threshold 0.764 (val referred 24.8%)
+- TEST: acc 0.820 | AUROC 0.909 | PR-AUC 0.781 | macro-F1 0.779 | melanoma recall 0.845
+        ECE 0.065 | AURC 0.062 | confidence AUROC 0.803
+        referred 25.6% | melanoma recall among auto-decided 0.921 (563/611, 95% CI
+        0.897 to 0.940) | 48 missed | latency 3.8 ms/image
+        42.3% of test cases at confidence exactly 1.0; 21 errors among 1,512 cases with
+        confidence >= 0.99 (baseline: 1 of 402)
+
+Reproducibility: test metrics identical (3 d.p.) to the previous full run for both models.
+
+PER ID SOURCE (test), baseline / siamese
+- IP    (1558 images, 92 mel):  mel recall 0.554 / 0.511; auto-decided mel recall 0.558 / 0.569
+- HAM   (386 images, 88 mel):   mel recall 0.830 / 0.807; auto-decided mel recall 0.982 / 0.933
+- dummy (1609 images, 634 mel): mel recall 0.916 / 0.899; auto-decided mel recall 0.993 / 0.956
+
+ACCEPTANCE CRITERIA
+1. Leakage-free data ............ MET (0 overlap, 0 exact dups, 0 near-dups, split reproducible)
+2. Discrimination (acc ~0.80) ... MET (0.820), but below the baseline on every metric
+3. Confidence vs baseline ....... NOT MET (AURC 0.062 vs 0.052, ECE 0.065 vs 0.023)
+4. Safe reject rule ............. NOT MET by Siamese (0.921 < 0.95); met by baseline (0.958)
+5. Resources .................... MET (2.24 GiB, 22.6 min, 3.8 ms)
+
+======================================================================
+5. PREDICT.PY RUNS
+======================================================================
+All modes ran without errors: random demo (both models), --autopsy (both models),
+--images, --show_full_test. Output text in outputs/predict_runs.log.
+Fix made after the run: the one-column baseline figures cut off their title; predict.py
+now uses a minimum figure width of 6 inches, a two-line title and a reserved title strip.
+
+======================================================================
+6. README REPORT (task step 3)
+======================================================================
+README.md rewritten as the full report, following the task sheet section 5.3 checklist:
+overview (problem, algorithm, how it works, headline figure, pipeline diagram),
+feasibility review (kept as presented; only dashes replaced and small typos fixed),
+files, dependencies with exact versions, data setup, usage commands, reproducibility,
+example input and output, data audit, pre-processing with references, split
+justification, method, tuning protocol, benchmarking tables and plots, per-source
+results, acceptance-criteria verdicts, resource profiling table, failure autopsy of
+5 cases (plus baseline cases), manager recommendation with trade-offs, limitations,
+"Artificial Intelligence Usage Disclosure" section, references.
+No em or en dashes. Figures copied to images/ (1.5 MB in total; large photo grids as JPEG).
+
+Things the student must check before submitting:
+- The AI disclosure describes the AI help honestly as far as the assistant knows it;
+  add any other tools used (e.g. other chatbots) and make sure every statement is true.
+- Read the whole report and edit it into your own words where needed; you are
+  responsible for every claim.
+- images/ must be committed (outputs/ and data/ are gitignored, which is correct).

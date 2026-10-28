@@ -1,0 +1,57 @@
+ID sources: {'IP': 11186, 'dummy': 10794, 'HAM': 2513}
+exact duplicate images (same MD5): 0 removed
+Using pretrained ResNet-18 backbone.
+
+==================== TRAINING siamese ====================
+
+siamese | device mps | train 17253 | val 3687 | pairs/epoch 17253 | margin 1.0 | k 5 | parameters 11,340,736
+epoch 1 | train loss 0.212 | val loss 0.194 | val AUROC 0.875 | val acc 0.857 | 193s
+epoch 2 | train loss 0.195 | val loss 0.184 | val AUROC 0.895 | val acc 0.868 | 193s
+epoch 3 | train loss 0.189 | val loss 0.189 | val AUROC 0.883 | val acc 0.864 | 193s
+epoch 4 | train loss 0.180 | val loss 0.190 | val AUROC 0.894 | val acc 0.869 | 194s
+epoch 5 | train loss 0.174 | val loss 0.197 | val AUROC 0.887 | val acc 0.869 | 193s
+epoch 6 | train loss 0.169 | val loss 0.182 | val AUROC 0.894 | val acc 0.869 | 195s
+epoch 7 | train loss 0.161 | val loss 0.183 | val AUROC 0.886 | val acc 0.877 | 193s
+early stopping: no improvement for 5 epochs
+
+best val AUROC 0.895 | total 22.6 min | peak GPU memory 2.24 GiB (mps)
+
+==================== VALIDATION TUNING (siamese) ====================
+
+embedding the training images (reference bank) ...
+   plain vote | k   3 | val AURC 0.077 | val AUROC 0.873 | melanoma recall 0.708 | referred 100.0%
+   plain vote | k   5 | val AURC 0.057 | val AUROC 0.895 | melanoma recall 0.704 | referred 100.0%
+   plain vote | k  10 | val AURC 0.042 | val AUROC 0.910 | melanoma recall 0.700 | referred 100.0%
+   plain vote | k  15 | val AURC 0.036 | val AUROC 0.916 | melanoma recall 0.684 | referred 100.0%
+   plain vote | k  20 | val AURC 0.034 | val AUROC 0.918 | melanoma recall 0.689 | referred 100.0%
+   plain vote | k  25 | val AURC 0.034 | val AUROC 0.919 | melanoma recall 0.683 | referred 100.0%
+   plain vote | k  30 | val AURC 0.034 | val AUROC 0.919 | melanoma recall 0.686 | referred 100.0%
+   plain vote | k  50 | val AURC 0.033 | val AUROC 0.919 | melanoma recall 0.681 | referred 100.0%
+   plain vote | k  75 | val AURC 0.033 | val AUROC 0.918 | melanoma recall 0.675 | referred 100.0%
+   plain vote | k 100 | val AURC 0.032 | val AUROC 0.919 | melanoma recall 0.673 | referred 100.0%
+   plain vote | k 150 | val AURC 0.032 | val AUROC 0.919 | melanoma recall 0.679 | referred 100.0%
+   plain vote | k 200 | val AURC 0.032 | val AUROC 0.919 | melanoma recall 0.683 | referred 100.0%
+balanced vote | k   3 | val AURC 0.085 | val AUROC 0.873 | melanoma recall 0.863 | referred 100.0%
+balanced vote | k   5 | val AURC 0.069 | val AUROC 0.895 | melanoma recall 0.841 | referred 100.0%
+balanced vote | k  10 | val AURC 0.060 | val AUROC 0.910 | melanoma recall 0.861 | referred 100.0%
+balanced vote | k  15 | val AURC 0.057 | val AUROC 0.916 | melanoma recall 0.876 | referred 28.2%
+balanced vote | k  20 | val AURC 0.057 | val AUROC 0.918 | melanoma recall 0.876 | referred 32.2%
+balanced vote | k  25 | val AURC 0.058 | val AUROC 0.919 | melanoma recall 0.880 | referred 24.8%
+balanced vote | k  30 | val AURC 0.058 | val AUROC 0.919 | melanoma recall 0.880 | referred 27.6%
+balanced vote | k  50 | val AURC 0.059 | val AUROC 0.919 | melanoma recall 0.874 | referred 28.7%
+balanced vote | k  75 | val AURC 0.059 | val AUROC 0.918 | melanoma recall 0.880 | referred 32.1%
+balanced vote | k 100 | val AURC 0.057 | val AUROC 0.919 | melanoma recall 0.880 | referred 32.2%
+balanced vote | k 150 | val AURC 0.057 | val AUROC 0.919 | melanoma recall 0.880 | referred 36.9%
+balanced vote | k 200 | val AURC 0.057 | val AUROC 0.919 | melanoma recall 0.872 | referred 33.5%
+
+plain vote, k 5 (training) -> balanced vote, k 25 (tuned) | melanoma recall 0.704 -> 0.880 | referred 100.0% -> 24.8%
+
+reject threshold 0.764 | val referred 24.8%
+
+==================== TESTING siamese ====================
+
+discrimination | acc 0.820 | AUROC 0.909 | PR-AUC 0.781 | macro-F1 0.779 | melanoma recall 0.845
+confidence     | ECE 0.065 | AURC 0.061
+reject rule    | referred 25.6% | melanoma recall among auto-decided 0.921
+resources      | latency 3.8 ms/image
+joint test plots in: outputs/roc_pr_curves.png, reliability_diagram.png, risk_coverage.png

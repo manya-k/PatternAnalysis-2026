@@ -146,7 +146,8 @@ def print_results(rows, probs, neighbours, tuned):
 
 def show(name, rows, probs, neighbours, tuned, path):
     n_cols = 1 + (N_NEIGHBOURS if neighbours else 0)
-    fig, axes = plt.subplots(len(rows), n_cols, figsize=(2.4 * n_cols, 2.8 * len(rows)), squeeze=False)
+    # At least 6 inches wide, so the title fits when there is only one column (baseline).
+    fig, axes = plt.subplots(len(rows), n_cols, figsize=(max(2.4 * n_cols, 6), 2.8 * len(rows)), squeeze=False)
     for r, (row, prob) in enumerate(zip(rows.itertuples(), probs)):
         predicted = int(prob >= 0.5)
         confidence = max(prob, 1 - prob)
@@ -170,8 +171,9 @@ def show(name, rows, probs, neighbours, tuned, path):
     threshold = tuned["reject_rule_validation"]["threshold"]
     rule = "refer every case" if threshold is None else f"refer if conf < {threshold:.3f}"
     title = "test image (left) and its nearest training images" if neighbours else "test images"
-    fig.suptitle(f"{name}: {title} ({setting}, {rule})", fontsize=10)
-    fig.tight_layout()
+    fig.suptitle(f"{name}: {title}\n({setting}, {rule})", fontsize=10)
+    # Keep the top 0.8 inch free for the two-line title.
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.8 / fig.get_figheight()))
     fig.savefig(path, dpi=150)
     plt.close(fig)
 

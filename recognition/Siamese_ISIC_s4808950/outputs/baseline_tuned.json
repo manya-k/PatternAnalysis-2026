@@ -1,0 +1,15 @@
+{
+  "temperature": 1.126033067703247,
+  "val_ece_before_temperature": 0.026081683126800863,
+  "val_ece_after_temperature": 0.026958236533967592,
+  "scoring_seconds": 28.473757028579712,
+  "reject_rule_validation": {
+    "threshold": 0.7726861238479614,
+    "auto_decided": 0.6788717114184974,
+    "referred": 0.32112828858150255,
+    "accuracy_auto_decided": 0.9244906112664802,
+    "melanoma_recall_auto_decided": 0.9507042253521126,
+    "melanomas_missed_by_automation": 28,
+    "system_melanoma_sensitivity": 0.9646017699115044
+  }
+}

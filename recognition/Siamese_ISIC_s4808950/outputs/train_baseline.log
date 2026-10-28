@@ -1,0 +1,36 @@
+ID sources: {'IP': 11186, 'dummy': 10794, 'HAM': 2513}
+exact duplicate images (same MD5): 0 removed
+Using pretrained ResNet-18 backbone.
+
+==================== TRAINING baseline ====================
+
+baseline | device mps | train 17253 | val 3687 | class weights [0.63, 2.36] | parameters 11,177,538
+epoch 1 | train loss 0.452 | val loss 0.367 | val AUROC 0.906 | val acc 0.803 | 112s
+epoch 2 | train loss 0.406 | val loss 0.363 | val AUROC 0.912 | val acc 0.838 | 111s
+epoch 3 | train loss 0.388 | val loss 0.344 | val AUROC 0.920 | val acc 0.798 | 110s
+epoch 4 | train loss 0.369 | val loss 0.328 | val AUROC 0.926 | val acc 0.855 | 110s
+epoch 5 | train loss 0.356 | val loss 0.336 | val AUROC 0.921 | val acc 0.822 | 110s
+epoch 6 | train loss 0.346 | val loss 0.364 | val AUROC 0.920 | val acc 0.862 | 110s
+epoch 7 | train loss 0.339 | val loss 0.332 | val AUROC 0.928 | val acc 0.844 | 110s
+epoch 8 | train loss 0.329 | val loss 0.339 | val AUROC 0.925 | val acc 0.842 | 560s
+epoch 9 | train loss 0.318 | val loss 0.334 | val AUROC 0.927 | val acc 0.840 | 110s
+epoch 10 | train loss 0.311 | val loss 0.347 | val AUROC 0.922 | val acc 0.829 | 112s
+epoch 11 | train loss 0.303 | val loss 0.362 | val AUROC 0.921 | val acc 0.829 | 110s
+epoch 12 | train loss 0.294 | val loss 0.377 | val AUROC 0.925 | val acc 0.814 | 110s
+early stopping: no improvement for 5 epochs
+
+best val AUROC 0.928 | total 29.6 min | peak GPU memory 1.23 GiB (mps)
+
+==================== VALIDATION TUNING (baseline) ====================
+
+temperature T = 1.126 | val ECE 0.026 (T = 1) -> 0.027 (tuned)
+
+reject threshold 0.773 | val referred 32.1%
+
+==================== TESTING baseline ====================
+
+discrimination | acc 0.838 | AUROC 0.933 | PR-AUC 0.829 | macro-F1 0.799 | melanoma recall 0.866
+confidence     | ECE 0.023 | AURC 0.052
+reject rule    | referred 34.3% | melanoma recall among auto-decided 0.958
+resources      | latency 3.0 ms/image
+joint test plots skipped: test the other model too

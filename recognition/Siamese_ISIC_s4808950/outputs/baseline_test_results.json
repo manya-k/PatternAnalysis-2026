@@ -1,0 +1,218 @@
+{
+  "model": "baseline",
+  "k": null,
+  "temperature": 1.126033067703247,
+  "discrimination": {
+    "n": 3553,
+    "melanoma": 814,
+    "accuracy": 0.838164931044188,
+    "precision_benign": 0.9542401343408901,
+    "recall_benign": 0.8298649142022636,
+    "precision_melanoma": 0.6020495303159693,
+    "recall_melanoma": 0.8660933660933661,
+    "macro_f1": 0.7990223493227128,
+    "auroc": 0.9327432580444628,
+    "pr_auc": 0.8289720903939568,
+    "confusion_matrix [[TN, FP], [FN, TP]]": [
+      [
+        2273,
+        466
+      ],
+      [
+        109,
+        705
+      ]
+    ]
+  },
+  "confidence_auroc": 0.8098157502846964,
+  "ece": 0.023007935381190656,
+  "calibration_table": [
+    {
+      "confidence": 0.515437662601471,
+      "accuracy": 0.373134328358209,
+      "count": 134
+    },
+    {
+      "confidence": 0.5512871742248535,
+      "accuracy": 0.5597014925373134,
+      "count": 134
+    },
+    {
+      "confidence": 0.5843872427940369,
+      "accuracy": 0.6357615894039735,
+      "count": 151
+    },
+    {
+      "confidence": 0.6180814504623413,
+      "accuracy": 0.6644295302013423,
+      "count": 149
+    },
+    {
+      "confidence": 0.6516430377960205,
+      "accuracy": 0.6875,
+      "count": 144
+    },
+    {
+      "confidence": 0.6844256520271301,
+      "accuracy": 0.7032258064516129,
+      "count": 155
+    },
+    {
+      "confidence": 0.7162912487983704,
+      "accuracy": 0.8013698630136986,
+      "count": 146
+    },
+    {
+      "confidence": 0.7492075562477112,
+      "accuracy": 0.7988165680473372,
+      "count": 169
+    },
+    {
+      "confidence": 0.7822051048278809,
+      "accuracy": 0.7607361963190185,
+      "count": 163
+    },
+    {
+      "confidence": 0.8153454661369324,
+      "accuracy": 0.8087431693989071,
+      "count": 183
+    },
+    {
+      "confidence": 0.8508509993553162,
+      "accuracy": 0.8571428571428571,
+      "count": 210
+    },
+    {
+      "confidence": 0.8832497596740723,
+      "accuracy": 0.9033816425120773,
+      "count": 207
+    },
+    {
+      "confidence": 0.9167447090148926,
+      "accuracy": 0.9240924092409241,
+      "count": 303
+    },
+    {
+      "confidence": 0.9517228603363037,
+      "accuracy": 0.9595959595959596,
+      "count": 396
+    },
+    {
+      "confidence": 0.9862877130508423,
+      "accuracy": 0.988998899889989,
+      "count": 909
+    }
+  ],
+  "aurc": 0.05182178814099145,
+  "reject_rule": {
+    "threshold": 0.7726861238479614,
+    "auto_decided": 0.657472558401351,
+    "referred": 0.342527441598649,
+    "accuracy_auto_decided": 0.9306506849315068,
+    "melanoma_recall_auto_decided": 0.9584837545126353,
+    "melanomas_missed_by_automation": 23,
+    "system_melanoma_sensitivity": 0.9717444717444718
+  },
+  "latency_ms_per_image": 2.9574165018857457,
+  "by_source": {
+    "IP": {
+      "discrimination": {
+        "n": 1558,
+        "melanoma": 92,
+        "accuracy": 0.9191270860077022,
+        "precision_benign": 0.9711673699015471,
+        "recall_benign": 0.942019099590723,
+        "precision_melanoma": 0.375,
+        "recall_melanoma": 0.5543478260869565,
+        "macro_f1": 0.7018698060941828,
+        "auroc": 0.8823477074559583,
+        "pr_auc": 0.41310418290791723,
+        "confusion_matrix [[TN, FP], [FN, TP]]": [
+          [
+            1381,
+            85
+          ],
+          [
+            41,
+            51
+          ]
+        ]
+      },
+      "reject_rule": {
+        "threshold": 0.7726861238479614,
+        "auto_decided": 0.7715019255455713,
+        "referred": 0.2284980744544287,
+        "accuracy_auto_decided": 0.9675540765391015,
+        "melanoma_recall_auto_decided": 0.5581395348837209,
+        "melanomas_missed_by_automation": 19,
+        "system_melanoma_sensitivity": 0.7934782608695652
+      }
+    },
+    "HAM": {
+      "discrimination": {
+        "n": 386,
+        "melanoma": 88,
+        "accuracy": 0.8575129533678757,
+        "precision_benign": 0.945054945054945,
+        "recall_benign": 0.8657718120805369,
+        "precision_melanoma": 0.6460176991150443,
+        "recall_melanoma": 0.8295454545454546,
+        "macro_f1": 0.8150229587613596,
+        "auroc": 0.9418090298962781,
+        "pr_auc": 0.8381194496394264,
+        "confusion_matrix [[TN, FP], [FN, TP]]": [
+          [
+            258,
+            40
+          ],
+          [
+            15,
+            73
+          ]
+        ]
+      },
+      "reject_rule": {
+        "threshold": 0.7726861238479614,
+        "auto_decided": 0.7072538860103627,
+        "referred": 0.29274611398963735,
+        "accuracy_auto_decided": 0.9487179487179487,
+        "melanoma_recall_auto_decided": 0.9818181818181818,
+        "melanomas_missed_by_automation": 1,
+        "system_melanoma_sensitivity": 0.9886363636363636
+      }
+    },
+    "dummy": {
+      "discrimination": {
+        "n": 1609,
+        "melanoma": 634,
+        "accuracy": 0.7551274083281542,
+        "precision_benign": 0.9228529839883551,
+        "recall_benign": 0.6502564102564102,
+        "precision_melanoma": 0.6301518438177874,
+        "recall_melanoma": 0.916403785488959,
+        "macro_f1": 0.7548614269053607,
+        "auroc": 0.906440184421257,
+        "pr_auc": 0.8728432071159284,
+        "confusion_matrix [[TN, FP], [FN, TP]]": [
+          [
+            634,
+            341
+          ],
+          [
+            53,
+            581
+          ]
+        ]
+      },
+      "reject_rule": {
+        "threshold": 0.7726861238479614,
+        "auto_decided": 0.5351149782473587,
+        "referred": 0.46488502175264135,
+        "accuracy_auto_decided": 0.8734030197444832,
+        "melanoma_recall_auto_decided": 0.993421052631579,
+        "melanomas_missed_by_automation": 3,
+        "system_melanoma_sensitivity": 0.9952681388012619
+      }
+    }
+  }
+}
