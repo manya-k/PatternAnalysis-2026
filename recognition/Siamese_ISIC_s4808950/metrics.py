@@ -6,7 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from sklearn.metrics import (average_precision_score, confusion_matrix,
-                             precision_recall_fscore_support, roc_auc_score)
+                             precision_recall_fscore_support, roc_auc_score,
+                            precision_recall_curve, roc_curve)
 
 N_BINS = 15            # bins for the expected calibration error
 LATENCY_IMAGES = 50    # images timed one at a time for the latency measurement
@@ -95,6 +96,51 @@ def single_image_latency_ms(predict_one, dataset, device):
         if i >= 5:  # skip warm-up iterations
             times.append((time.perf_counter() - start) * 1000)
     return float(np.median(times))
+
+
+def plot_reliability(results, path):
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.plot([0.5, 1], [0.5, 1], "--", color="grey", label="perfect calibration")
+    for name, r in results.items():
+        table = r["test_calibration_table"]
+        ax.plot([b["confidence"] for b in table], [b["accuracy"] for b in table], marker="o",
+                label=f"{name} (ECE {r['test_ece']:.3f})")
+    ax.set(xlabel="confidence", ylabel="accuracy", title="Reliability diagram (test)", xlim=(0.5, 1), ylim=(0, 1))
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def plot_risk_coverage(curves, path):
+    fig, ax = plt.subplots(figsize=(6, 4))
+    for name, (coverage, risk, aurc) in curves.items():
+        ax.plot(coverage, risk, label=f"{name} (AURC {aurc:.3f})")
+    ax.set(xlabel="coverage (fraction auto-decided)", ylabel="error rate among auto-decided",
+           title="Risk-coverage (test)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def plot_roc_pr(scores, path):
+    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(10, 4))
+    for name, (labels, probs) in scores.items():
+        fpr, tpr, _ = roc_curve(labels, probs)
+        precision, recall, _ = precision_recall_curve(labels, probs)
+        ax_roc.plot(fpr, tpr, label=f"{name} (AUROC {roc_auc_score(labels, probs):.3f})")
+        ax_pr.plot(recall, precision, label=f"{name} (PR-AUC {average_precision_score(labels, probs):.3f})")
+    
+    ax_roc.plot([0, 1], [0, 1], "--", color="grey")
+    ax_roc.set(xlabel="false positive rate", ylabel="true positive rate (recall)", title="ROC (test)")
+    ax_pr.set(xlabel="recall", ylabel="precision", title="Precision-recall (test)")
+    for ax in (ax_roc, ax_pr):
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
 
 
 def plot_k_tuning(k_scores, chosen_k, path):

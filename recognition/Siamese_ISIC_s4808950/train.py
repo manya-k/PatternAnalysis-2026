@@ -371,14 +371,13 @@ def main():
         optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
         print(f"{MODEL_CHOICE} | device {device} | train {len(train_set)} | val {len(val_set)} | "
               f"{setup['details']} | parameters {count_parameters(model):,}")
-        weights_path = train_epochs(setup, optimizer, val_loader, device, args)
+        weights_path = train_epochs(setup, optimizer, val_loader, device)
 
         # Tune and test the best checkpoint, not the weights from the last epoch.
         model.load_state_dict(torch.load(weights_path, map_location=device))
         tuned = tune_model(model, device, train_set, val_loader)
 
     test_model(model, device, train_set, test_set, tuned)
-
 
 
 def load_model(name, device):
@@ -593,11 +592,30 @@ def test_model(model, device, train_df, test_df, tuned):
           f"latency {result['latency_ms_per_image']:.} ms/image")
     return result
 
+
+def plot_test_comparison():
+    paths = []
+    for name in ("baseline", "siamese"):
+        paths[name] = os.path.join(OUT_DIR, f"{name}_test_predictions.csv")
+    
+    if not all(os.path.exists(path) for path in paths.values()):
+        print("joint test plots skipped: test the other model too")
+        return
+    
+    scores, calibrations, curves = {}, {}, {}
+    for name, path in paths.items():
+        predictions = pd.read_csv(path)
+        confidence, correct = predictions["confidence"].values, predictions["correct"].values.astype(bool)
+        scores[name] = (predictions["target"].values, predictions["prob_melanoma"].values)
+        ece, table = calibration(confidence, correct)
+        calibrations[name] = {"test_ece": ece, "test_calibration_table": table}
+        curves[name] = risk_coverage(confidence, correct)
+    # all the plots
+    plot_roc_pr(scores, os.path.join(OUT_DIR, "roc_pr_curves.png"))
+    plot_reliability(calibrations, os.path.join(OUT_DIR, "reliability_diagram.png"))
+    plot_risk_coverage(curves, os.path.join(OUT_DIR, "risk_coverage.png"))
+    print(f"joint test plots in: {OUT_DIR}/roc_pr_curves.png, reliability_diagram.png, risk_coverage.png")
+
+
 if __name__ == "__main__":
     main()
-
-"""
-things remaining in this file:
-3. and all the plots 
-need to organise the code file ong
-"""
