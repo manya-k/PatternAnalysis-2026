@@ -13,7 +13,6 @@ from dataset import LesionDataset, get_splits
 from train import (DATA_ROOT, OUT_DIR, SEED, embed_all, load_model, loader, melanoma_scores,
                    pick_device, plot_test_comparison, sample_split, training_bank)
 
-
 N_RANDOM = 6           
 N_NEIGHBOURS = 5      
 N_FALSE_NEGATIVES = 3
@@ -99,6 +98,16 @@ def print_errors_by_source(predictions):
     print(table.round(3).to_string(), "\n")
 
 
+@torch.no_grad()
+def nearest_training_images(model, rows, train_df, device):
+    """For each Siamese query, its N_NEIGHBOURS closest training images and their distances."""
+    bank, _ = training_bank(model, train_df, device)
+    bank_rows = train_df.reset_index(drop=True) 
+    query, _ = embed_all(model, loader(LesionDataset(rows, "test")), device)
+    
+    distances, indices = torch.cdist(query, bank).topk(N_NEIGHBOURS, dim=1, largest=False)
+    return [[(bank_rows.loc[int(j)], float(d)) for d, j in zip(dist_row, idx_row)]
+            for dist_row, idx_row in zip(distances, indices)]
 
 def main():
     parser = argparse.ArgumentParser(description="Classify test images with a trained model.")
@@ -117,11 +126,12 @@ def main():
     df = get_splits(DATA_ROOT)
     test_df = df[df["split"] == "test"]
     train_df = df[df["split"] == "train"]
-    tuned = load_settings(model)   
+    tuned = load_settings(args.model)
     print(f"Running trained {model} model at threshold {tuned["threshold"]},"
           f"temp {tuned["temperature"]} and k {tuned["k"]}") 
     rows = choose_rows(args.model, test_df, args).reset_index(drop=True)
     labels, probs = melanoma_scores(args.model, model, loader(LesionDataset(rows, "test")), device, tuned, train_df)
+    nearest_training_images(model, rows, train_df, device) if args.model == "siamese" else None
 
 
 if __name__ == "__main__":
