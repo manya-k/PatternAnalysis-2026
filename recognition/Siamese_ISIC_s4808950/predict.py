@@ -13,10 +13,11 @@ from dataset import LesionDataset, get_splits
 from train import (DATA_ROOT, OUT_DIR, SEED, embed_all, load_model, loader, melanoma_scores,
                    pick_device, plot_test_comparison, sample_split, training_bank)
 
+CLASS_NAMES = {0: "benign", 1: "melanoma"}
 N_RANDOM = 6           
 N_NEIGHBOURS = 5      
-N_FALSE_NEGATIVES = 3
-N_FALSE_POSITIVES = 2
+N_FALSE_NEGATIVES = 3 
+N_FALSE_POSITIVES = 2  
 
 
 def load_settings(name):
@@ -109,6 +110,51 @@ def nearest_training_images(model, rows, train_df, device):
     return [[(bank_rows.loc[int(j)], float(d)) for d, j in zip(dist_row, idx_row)]
             for dist_row, idx_row in zip(distances, indices)]
 
+
+def print_results(rows, probs, neighbours, tuned):
+    print(f"{'isic_id':>26} {'source':>6} {'true':>9} {'pred':>9} {'p(mel)':>7} {'conf':>5} {'decision':>8}")
+    for r, (row, prob) in enumerate(zip(rows.itertuples(), probs)):
+        predicted = int(prob >= 0.5)
+        confidence = max(prob, 1 - prob)
+        print(f"{row.isic_id:>26} {row.id_source:>6} {CLASS_NAMES[row.target]:>9} {CLASS_NAMES[predicted]:>9} "
+              f"{prob:>7.3f} {confidence:>5.3f} {decision(confidence, tuned):>8}")
+        if neighbours:
+            summary = ", ".join(f"{CLASS_NAMES[int(n['target'])][:3]} {d:.2f}" for n, d in neighbours[r])
+            print(f"{'':>26} nearest training images: {summary}")
+
+
+def show(name, rows, probs, neighbours, tuned, path):
+    n_cols = 1 + (N_NEIGHBOURS if neighbours else 0)
+    fig, axes = plt.subplots(len(rows), n_cols, figsize=(2.4 * n_cols, 2.8 * len(rows)), squeeze=False)
+    for r, (row, prob) in enumerate(zip(rows.itertuples(), probs)):
+        predicted = int(prob >= 0.5)
+        confidence = max(prob, 1 - prob)
+        axes[r][0].imshow(Image.open(row.path).convert("RGB"))
+        axes[r][0].set_title(f"{row.isic_id} ({row.id_source})\n"
+                             f"true {CLASS_NAMES[row.target]} | pred {CLASS_NAMES[predicted]}\n"
+                             f"p(mel) {prob:.2f} | conf {confidence:.2f} | {decision(confidence, tuned)}",
+                             fontsize=7, color="green" if predicted == row.target else "red")
+        if neighbours:
+            for c, (neighbour, distance) in enumerate(neighbours[r], start=1):
+                axes[r][c].imshow(Image.open(neighbour["path"]).convert("RGB"))
+                axes[r][c].set_title(f"neighbour {c}: {CLASS_NAMES[int(neighbour['target'])]}\n"
+                                     f"distance {distance:.2f}", fontsize=7)
+    for ax in axes.flat:
+        ax.axis("off")
+
+    if name == "siamese":
+        setting = f"k = {tuned['k']}, {tuned.get('vote', 'plain')} vote"
+    else:
+        setting = f"T = {tuned['temperature']:.2f}"
+    threshold = tuned["reject_rule_validation"]["threshold"]
+    rule = "refer every case" if threshold is None else f"refer if conf < {threshold:.3f}"
+    title = "test image (left) and its nearest training images" if neighbours else "test images"
+    fig.suptitle(f"{name}: {title} ({setting}, {rule})", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Classify test images with a trained model.")
     parser.add_argument("--model", choices=["baseline", "siamese"], default="siamese")
@@ -129,9 +175,15 @@ def main():
     tuned = load_settings(args.model)
     print(f"Running trained {model} model at threshold {tuned["threshold"]},"
           f"temp {tuned["temperature"]} and k {tuned["k"]}") 
+    
     rows = choose_rows(args.model, test_df, args).reset_index(drop=True)
     labels, probs = melanoma_scores(args.model, model, loader(LesionDataset(rows, "test")), device, tuned, train_df)
-    nearest_training_images(model, rows, train_df, device) if args.model == "siamese" else None
+    neighbours = nearest_training_images(model, rows, train_df, device) if args.model == "siamese" else None
+    
+    print_results(rows, probs.tolist(), neighbours, tuned)
+    figure = os.path.join(OUT_DIR, f"{'autopsy' if args.autopsy else 'predict'}_{args.model}.png")
+    show(args.model, rows, probs.tolist(), neighbours, tuned, figure)
+    print(f"\nfigure -> {figure}")
 
 
 if __name__ == "__main__":
