@@ -77,6 +77,87 @@ def load_metadata(data_root):
     return df
 
 
+def file_md5(path):
+    """
+    MD5 hash of a file's bytes, so byte-identical images get the same value.
+
+    Args:
+        path (str): Path to the file.
+
+    Returns:
+        str: The hexadecimal MD5 digest.
+    """
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+
+def remove_exact_duplicates(df):
+    """
+    Drop images whose file is byte-identical to an earlier image, keeping the first copy.
+
+    A duplicate in two different splits would let the model be tested on an image it
+    was trained on, so duplicates are removed before splitting.
+
+    Args:
+        df (pd.DataFrame): Metadata from load_metadata (needs the path column).
+
+    Returns:
+        pd.DataFrame: The same rows without the duplicates, with a fresh 0..n-1 index.
+    """
+    digests = df["path"].map(file_md5)
+    duplicate = digests.duplicated(keep="first")
+    print(f"exact duplicate images with same md5: {int(duplicate.sum())} removed")
+    return df[~duplicate].reset_index(drop=True)
+
+
+def difference_hash(path, size=16):
+    """
+    Perceptual "difference hash" of an image (Krawetz, 2013).
+
+    The image is shrunk to (size + 1) x size greyscale pixels and each bit records
+    whether a pixel is brighter than its right-hand neighbour. Re-encoded, resized or
+    slightly recoloured copies of the same photo keep the same hash, unlike an MD5.
+    A 16 x 16 grid (256 bits) is used because an 8 x 8 hash also matches different
+    lesions that share a layout, such as a small central lesion on plain skin.
+
+    Args:
+        path (str): Path to the image file.
+        size (int): Hash grid size; the hash has size * size bits.
+
+    Returns:
+        int: The hash as an integer.
+    """
+    image = Image.open(path).convert("L").resize((size + 1, size), Image.Resampling.LANCZOS)
+    pixels = list(image.getdata())
+    bits = 0
+    for row in range(size):
+        for col in range(size):
+            left = pixels[row * (size + 1) + col]
+            right = pixels[row * (size + 1) + col + 1]
+            bits = (bits << 1) | int(left > right)
+    return bits
+
+
+def near_duplicates_across_splits(df):
+    """
+    Find groups of images with the same difference hash that fall in different splits.
+
+    These are likely the same lesion photographed or encoded twice, which a patient_id
+    grouping cannot catch when the images have HAM or dummy IDs.
+
+    Args:
+        df (pd.DataFrame): Split table from get_splits (needs path and split columns).
+
+    Returns:
+        pd.DataFrame: The rows of every hash group that spans more than one split,
+            with an added dhash column (empty if there are none).
+    """
+    hashes = df.assign(dhash=df["path"].map(difference_hash))
+    splits_per_hash = hashes.groupby("dhash")["split"].nunique()
+    shared = splits_per_hash[splits_per_hash > 1].index
+    return hashes[hashes["dhash"].isin(shared)].sort_values("dhash")
+
+
 def build_transforms(train):
     """
     Image preprocessing: random augmentation for training, or a fixed pipeline otherwise.
@@ -328,7 +409,7 @@ def get_splits(data_root, seed=42):
     """
     # The split is saved next to the data so every script reuses it.
     split_file = os.path.join(data_root, SPLIT_FILE)
-    df = load_metadata(data_root)
+    df = remove_exact_duplicates(load_metadata(data_root))
     if os.path.exists(split_file):
         saved = pd.read_csv(split_file)[["isic_id", "split"]]
         # Attach the saved split to each image, checking that every image is covered.
@@ -365,6 +446,12 @@ def report_splits(df):
               f"IP/HAM/dummy {mix.get('IP', 0):.1%} / {mix.get('HAM', 0):.1%} / {mix.get('dummy', 0):.1%}")
     overlap = df.groupby("patient_id")["split"].nunique().gt(1).sum()
     print(f"\npatient IDs in more than one split: {overlap}")
+
+    near = near_duplicates_across_splits(df)
+    print(f"near-duplicate groups (same difference hash) spanning splits: {near['dhash'].nunique()} "
+          f"({len(near)} images)")
+    if len(near):
+        print(near[["isic_id", "patient_id", "target", "split"]].head(10).to_string(index=False))
 
 
 if __name__ == "__main__":
