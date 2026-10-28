@@ -1,3 +1,24 @@
+"""
+predict.py
+
+Example usage of the trained models: load the saved weights and the settings tuned on
+validation, classify a few test images, print the results and save a figure.
+
+    python predict.py --model siamese                     # 6 random test images
+    python predict.py --model baseline --images ISIC_0033837 ISIC_0066921
+    python predict.py --model siamese --autopsy           # most confident test errors (3 FN + 2 FP)
+    python predict.py --model siamese --show_full_test    # saved results on the full test split
+
+Each image gets what the triage tool would return: a benign/melanoma decision, a
+confidence score, and "auto" or "REFER" (to a specialist) from the reject threshold chosen
+on validation. For the Siamese model, each image is also shown next to its nearest
+training images, the evidence behind its prediction. Figures are saved to outputs/.
+
+Needs the files written by train.py: <model>_best.pt and <model>_tuned.json, plus
+<model>_test_results.json and <model>_test_predictions.csv for --show_full_test and
+--autopsy. Nothing here changes those files: the full test is train.py's job.
+"""
+
 import argparse
 import os
 import json
@@ -11,7 +32,7 @@ from PIL import Image
 
 from dataset import LesionDataset, get_splits
 from train import (DATA_ROOT, OUT_DIR, SEED, embed_all, load_model, loader, melanoma_scores,
-                   pick_device, plot_test_comparison, sample_split, training_bank)
+                   pick_device, sample_split, training_bank)
 
 CLASS_NAMES = {0: "benign", 1: "melanoma"}
 N_RANDOM = 6           
@@ -65,7 +86,7 @@ def choose_rows(name, test_df, args):
     if args.autopsy:
         path = os.path.join(OUT_DIR, f"{name}_test_predictions.csv")
         if not os.path.exists(path):
-            raise SystemExit(f"{path} not found, running train.py or predict.py without autospy required first")
+            raise SystemExit(f"{path} not found: run train.py --model {name} first")
         
         predictions = pd.read_csv(path)
         print_errors_by_source(predictions)
@@ -76,7 +97,7 @@ def choose_rows(name, test_df, args):
         chosen = pd.concat([false_negatives, false_positives])["isic_id"]
         return test_df.set_index("isic_id").loc[chosen].reset_index()
 
-    return sample_split(test_df, "test", N_RANDOM)
+    return sample_split(test_df, "test", N_RANDOM, SEED)
 
 
 def print_errors_by_source(predictions):
@@ -173,8 +194,10 @@ def main():
     test_df = df[df["split"] == "test"]
     train_df = df[df["split"] == "train"]
     tuned = load_settings(args.model)
-    print(f"Running trained {model} model at threshold {tuned["threshold"]},"
-          f"temp {tuned["temperature"]} and k {tuned["k"]}") 
+    threshold = tuned["reject_rule_validation"]["threshold"]
+    print(f"Running the trained {args.model} model: k {tuned.get('k')}, vote {tuned.get('vote')}, "
+          f"temperature {tuned.get('temperature')}, reject threshold "
+          f"{'none (refer every case)' if threshold is None else f'{threshold:.3f}'}\n")
     
     rows = choose_rows(args.model, test_df, args).reset_index(drop=True)
     labels, probs = melanoma_scores(args.model, model, loader(LesionDataset(rows, "test")), device, tuned, train_df)

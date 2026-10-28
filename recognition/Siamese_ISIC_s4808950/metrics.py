@@ -1,3 +1,13 @@
+"""
+metrics.py
+
+Measurement and plotting helpers shared by train.py: discrimination metrics, calibration
+(ECE), risk-coverage (AURC), single-image latency and the evaluation plots.
+
+Everything here only measures or draws; nothing is fitted. Choosing k, the kNN vote, the
+temperature and the reject threshold happens in train.py, on validation data only.
+"""
+
 import time
 
 import matplotlib
@@ -60,6 +70,22 @@ def calibration(confidence, correct, n_bins=N_BINS):
 
 
 def risk_coverage(confidence, correct):
+    """
+    Risk-coverage curve and its area, AURC (Geifman and El-Yaniv, 2017).
+
+    Predictions are sorted from most to least confident. Auto-deciding only the top k
+    gives coverage k / N and risk = error rate among those k. A useful confidence score
+    makes risk fall steeply as coverage shrinks; lower AURC is better. Tied confidences
+    cannot be separated by any threshold, so each tied case gets the risk of accepting
+    its whole group, which makes the result independent of the order of ties.
+
+    Args:
+        confidence (np.ndarray): Confidence of each prediction.
+        correct (np.ndarray): True where the prediction was correct.
+
+    Returns:
+        tuple: (coverage array, risk array, AURC as a float).
+    """
 
     order = np.argsort(-confidence, kind="stable")
     conf, errors = confidence[order], np.cumsum(~correct[order])
@@ -99,6 +125,13 @@ def single_image_latency_ms(predict_one, dataset, device):
 
 
 def plot_reliability(results, path):
+    """
+    Reliability diagram: mean confidence against accuracy per confidence bin, per model.
+
+    Args:
+        results (dict): Model name to {"test_ece": float, "test_calibration_table": list}.
+        path (str): Where to save the PNG.
+    """
     fig, ax = plt.subplots(figsize=(5, 5))
     ax.plot([0.5, 1], [0.5, 1], "--", color="grey", label="perfect calibration")
     for name, r in results.items():
@@ -113,6 +146,13 @@ def plot_reliability(results, path):
 
 
 def plot_risk_coverage(curves, path):
+    """
+    Risk-coverage curves of several models on one figure.
+
+    Args:
+        curves (dict): Model name to the (coverage, risk, aurc) tuple from risk_coverage.
+        path (str): Where to save the PNG.
+    """
     fig, ax = plt.subplots(figsize=(6, 4))
     for name, (coverage, risk, aurc) in curves.items():
         ax.plot(coverage, risk, label=f"{name} (AURC {aurc:.3f})")
@@ -125,6 +165,13 @@ def plot_risk_coverage(curves, path):
 
 
 def plot_roc_pr(scores, path):
+    """
+    ROC and precision-recall curves of several models, side by side.
+
+    Args:
+        scores (dict): Model name to (labels, melanoma probabilities).
+        path (str): Where to save the PNG.
+    """
     fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(10, 4))
     for name, (labels, probs) in scores.items():
         fpr, tpr, _ = roc_curve(labels, probs)

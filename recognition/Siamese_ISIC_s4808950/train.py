@@ -1,18 +1,23 @@
 """
-Train and validate the models, saving the best weights and the training curves.
+train.py
+
+Train, validate, tune, test and save the models of the ISIC melanoma Siamese classifier.
 
   --model baseline: ResNet-18 classifier trained with class-weighted cross-entropy.
   --model siamese:  Siamese network trained on image pairs with contrastive loss,
                     validated by k-nearest-neighbour classification against the
                     embedded training images.
 
-After training, the best checkpoint is tuned on validation (k for the Siamese model,
-temperature for the baseline, reject threshold for both) and then tested once on the test split.
+After training, the best checkpoint is tuned on validation only (temperature for the
+baseline; k and a plain or class-balanced kNN vote for the Siamese model; the reject
+threshold for both) and then tested once on the test split. Every output (weights,
+curves, tuned settings, test results, per-image predictions and plots) goes to outputs/.
 
 Usage example:
     python train.py --model baseline
     python train.py --model siamese
-    python train.py --model siamese --test_only 
+    python train.py --model siamese --skip_training   # re-tune and re-test the saved checkpoint
+    python train.py --model siamese --test_only       # re-test with the saved tuned settings
 """
 
 import argparse
@@ -53,7 +58,7 @@ TEST = False
 RECALL_TARGET = 0.95
 K_CANDIDATES = (3, 5, 10, 15, 20, 25, 30, 50, 75, 100, 150, 200) 
 def parse_args():
-    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, TESR
+    global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN
 
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
     parser.add_argument("--model", choices=["baseline", "siamese"], default=MODEL_CHOICE)
@@ -69,9 +74,9 @@ def parse_args():
                         help="skip training: re-tune the saved checkpoint on validation, then test it")
 
     args = parser.parse_args()
-    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN, TEST = (
+    MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN = (
         args.model, args.epochs, args.batch_size,
-        args.patience, args.num_workers, args.seed, args.margin, args.test_only
+        args.patience, args.num_workers, args.seed, args.margin
     )
 
     return args
@@ -415,6 +420,8 @@ def main():
         tuned = tune_model(model, device, train_set, val_loader)
 
     test_model(model, device, train_set, test_set, tuned)
+    # Baseline vs Siamese plots on the test split, once both models have been tested.
+    plot_test_comparison()
 
 
 def load_model(name, device):
