@@ -1,12 +1,22 @@
 # Siamese Network for ISIC Melanoma Triage
 **Problem:** binary classification of dermoscopic images (benign vs. melanoma) with a confidence indication for  "refer to a specialist" option if unsure.
-
 **Model:** Siamese metric-learning network (shared ResNet-18 encoder, contrastive loss, k-nearest-neighbour inference), compared against a conventional ResNet-18 classifier.
 **Dataset:** [ISIC Melanoma Dataset, resized to 224x224 (Kaggle)](https://www.kaggle.com/datasets/roua91/isic-melanoma-dataset-resized-to-224x224) [7].
 
 ## Contents
+
 1. [Overview](#1-overview)
 2. [Feasibility Review](#2-feasibility-review)
+3. [Repository Structure, Dependencies and Usage](#3-repository-structure-dependencies-and-usage)
+4. [Data, Pre-processing and Splits](#4-data-pre-processing-and-splits)
+5. [Method](#5-method)
+6. [Results: Benchmarking Against the Baseline](#6-results-benchmarking-against-the-baseline)
+7. [Resource Profiling](#7-resource-profiling)
+8. [Failure Case Autopsy](#8-failure-case-autopsy)
+9. [Recommendation to the Project Manager](#9-recommendation-to-the-project-manager)
+10. [Limitations and Future Work](#10-limitations-and-future-work)
+11. [Artificial Intelligence Usage Disclosure](#11-artificial-intelligence-usage-disclosure)
+12. [References](#12-references)
 
 ---
 
@@ -20,10 +30,32 @@ Melanoma is the deadliest skin cancer, but it is curable when excised early. A t
 
 A **Siamese network** [1] passes two images through the *same* encoder (an ImageNet-pretrained ResNet-18 [2] with a small projection head) and maps each to a 128-dimensional, unit-length embedding. It is trained with **contrastive loss** [3] on image pairs: lesions of the same class are pulled together in the embedding space and lesions of different classes are pushed at least a margin apart. After training, every training image is embedded once to form a **reference bank**. A new image is embedded and compared with its **k nearest reference lesions**; their distance-weighted vote gives the melanoma probability, and the share of the vote for the predicted class is the confidence. Cases whose confidence is below a threshold chosen on validation data are **referred** to a specialist. The nearest reference images double as visual evidence for the clinician. The **baseline** is the same pretrained ResNet-18 trained directly as a two-class classifier with class-weighted cross-entropy and temperature scaling [4], so the comparison isolates metric learning versus direct classification rather than two different architectures.
 
+### What the tool returns
+
+For each image: a benign or melanoma decision, a confidence score, "auto" or "REFER", and (Siamese) the closest training lesions with their labels and distances. Green titles are correct predictions, red are errors.
+
+![Siamese predictions on six random test images, each shown with its five nearest training images](images/predict_siamese.jpg)
+
+*Figure 1. `python predict.py --model siamese`: six random test images (left column) and their nearest training images. The model's tuned settings (k = 25, class-balanced vote, refer if confidence < 0.764) are shown in the title.*
+
+```mermaid
+flowchart LR
+    A[Dermoscopic image] --> B[Shared ResNet-18 encoder + projection head]
+    B --> C[128-d unit-length embedding]
+    C --> D[k = 25 nearest training embeddings]
+    D --> E[Class-balanced, distance-weighted vote]
+    E --> F{Confidence >= 0.764?}
+    F -- yes --> G[Auto-decide benign or melanoma]
+    F -- no --> H[Refer to specialist]
+```
+
+### Headline result
+
+On the held-out test split (3,553 images, 814 melanomas), the Siamese model reaches **0.820 accuracy and 0.909 AUROC**, meeting the task's accuracy target, but the baseline is better on every discrimination and confidence metric (0.838 accuracy, 0.933 AUROC, ECE 0.023 vs 0.065, AURC 0.052 vs 0.062). The Siamese confidence is **not** a better indicator of correctness as 42% of its test predictions have confidence exactly 1.0, and these include confidently missed melanomas. The baseline's reject rule meets the safety target as melanoma recall among auto-decided cases 0.958 with 34% referred. On the other hand, the Siamese rule refers fewer cases (26%) but misses the target (0.921). Overall, Both models perform far worse on the realistic `IP` subset of real patients. The recommendation is not to advance the Siamese model as the triage engine.
+
 ---
 
 ## 2. Feasibility Review
-
 
 **Project:** Siamese metric-learning classifier with a reject option for melanoma triage  
 **Dataset:** [ISIC Melanoma Dataset, resized to 224x224 (Kaggle)](https://www.kaggle.com/datasets/roua91/isic-melanoma-dataset-resized-to-224x224)
@@ -118,9 +150,218 @@ Siamese networks suit this problem because the decision becomes a *comparison ag
 
 The split, the metrics and the reject-rule protocol stay fixed throughout, so any fallback can still answer the dilemma. A negative result, such as the Siamese confidence being *no better* than the calibrated baseline, is still a valid, evidence-based recommendation.
 
-### References
+---
 
-[1] G. Koch, R. Zemel, and R. Salakhutdinov, "Siamese neural networks for one-shot image recognition," in *ICML Deep Learning Workshop*, 2015.  
+## 3. Repository Structure, Dependencies and Usage
+
+### 3.1 Files
+
+| File | Purpose |
+|---|---|
+| [`dataset.py`](dataset.py) | Loads the metadata, removes exact duplicates, builds and saves the patient-grouped split, checks patient overlap and cross-split near-duplicate, defines the augmentations, `LesionDataset` (single images) and `PairDataset` (pairs for contrastive training). |
+| [`modules.py`](modules.py) | `BaselineClassifier`, `SiameseNet`, `ContrastiveLoss` and the shared ResNet-18 backbone. Running this alone performs a self-test. |
+| [`train.py`](train.py) | Trains either model with early stopping, plots the curves, tunes the post-hoc settings on validation, tests once on the test split and saves every result. |
+| [`metrics.py`](metrics.py) | Helper with measurement and plotting functions only: discrimination metrics, ECE, risk-coverage/AURC, single-image latency and the evaluation plots. |
+| [`predict.py`](predict.py) | Example usage: loads the saved weights and tuned settings, classifies chosen or random test images, prints the results, draws the figures and runs the failure autopsy. |
+| `images/` | Figures used in this README (copied from `outputs/`). |
+| `data/`, `outputs/` | Dataset and generated files (weights, logs, JSON/CSV results, plots). Not committed (`.gitignore`). |
+
+### 3.2 Dependencies
+
+Tested with **Python 3.12.1** on macOS with an **Apple M5 Pro** GPU (PyTorch MPS backend). The code also runs on CUDA (e.g. Rangpur) or CPU. This is automatically chosen by `pick_device()` in `train.py`.
+
+| Package | Version |
+|---|---|
+| torch | 2.8.0 |
+| torchvision | 0.23.0 |
+| numpy | 2.2.6 |
+| pandas | 2.3.2 |
+| scikit-learn | 1.7.1 |
+| pillow | 11.2.1 |
+| matplotlib | 3.10.6 |
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3.3 Data
+
+Download the [Kaggle dataset](https://www.kaggle.com/datasets/roua91/isic-melanoma-dataset-resized-to-224x224) and place it inside the `data/` folder so that the folder looks like this :
+
+```
+data/
+  cleaned_metadata.csv
+  combined_images/ISIC_0000000.jpg ...
+```
+
+### 3.4 Running the pipeline
+
+```bash
+python dataset.py  # creates data/splits.csv (seed 42) and prints the data audit
+python modules.py  # model self-test: shapes, unit-length embeddings, weight sharing, loss values
+python train.py --model baseline # train, tune on validation, test once, save to outputs/
+python train.py --model siamese # same for the Siamese network; also draws the joint test plots
+python predict.py --model siamese  # 6 random test images with their nearest training images
+python predict.py --model baseline --images ISIC_0033837 ISIC_0066921
+python predict.py --model siamese --autopsy  # 3 most confident missed melanomas + 2 false alarms
+python predict.py --model siamese --show_full_test # saved results on the full test split
+```
+
+Useful extra options: `train.py --model siamese --skip_training` re-tunes and re-tests a saved checkpoint, `--test_only` re-tests it with its saved settings, and `--epochs`, `--batch_size`, `--patience`, `--margin`, `--seed` override the defaults.
+
+**Outputs** (all in `outputs/`): `<model>_best.pt` (weights), `<model>_history.json` and `<model>_curves.png` (training), `<model>_tuned.json` (settings chosen on validation), `<model>_test_results.json` (all test metrics, overall and per ID source), `<model>_test_predictions.csv` (one row per test image), `siamese_k_tuning.png`, `roc_pr_curves.png`, `reliability_diagram.png`, `risk_coverage.png`, `siamese_bank.pt` (cached reference bank) and the `predict_*` / `autopsy_*` figures.
+
+### 3.5 Reproducibility
+
+- **Fixed split:** the split is created once with seed 42 and saved to `data/splits.csv`; every script reuses it. Deleting it and re-running `dataset.py` regenerated a byte-for-byte identical file.
+- **Seeds:** `torch.manual_seed(0)` for training; pairs are drawn from a per-item seeded generator (`seed, epoch, index`), so they do not depend on the number of DataLoader workers; the random demo images use a fixed seed.
+- **Verified:** for the final run, `outputs/` was emptied and the split, both trainings, tuning and testing were run from scratch. The test metrics matched the previous full run to three decimal places for both models. GPU kernels on MPS/CUDA are not guaranteed to be bit-for-bit deterministic, so small differences are possible on other hardware.
+- **Checks on the inference path:** `predict.py` reproduces the test-step probabilities for the same images (maximum difference 3e-8), and the cached reference bank is invalidated automatically when the checkpoint changes.
+
+## 4. Data, Pre-processing and Splits
+
+### 4.1 Data audit (from `python dataset.py`)
+
+| Check | Result |
+|---|---|
+| Images / metadata rows | 24,493 / 24,493 (19,227 benign, 5,266 melanoma) |
+| Exact duplicates (MD5 of file bytes) | **0** removed |
+| Patient IDs in more than one split | **0** |
+| Near-duplicate images across splits (16x16 difference hash [10]) | **0** groups |
+
+With the common 8x8 difference hash, 37 cross-split groups (101 images) matched. Visual inspection showed these were *different* lesions with the same coarse layout (a small central lesion on plain skin, or the black circle of a dermatoscope), and 15 groups even mixed benign and melanoma images. A 16x16 (256-bit) hash removes these false matches and finds no duplicates, so no near-duplicate leakage was detected.
+
+### 4.2 Pre-processing
+
+The Kaggle images are already resized to 224x224, the input size of ResNet-18, so no resizing is needed at evaluation time.
+
+- **All splits:** conversion to a tensor and normalisation with the ImageNet mean and standard deviation, matching the statistics the pretrained backbone was trained with [2].
+- **Training only (augmentation):** random resized crop (scale 0.8 to 1.0, aspect 0.9 to 1.1), horizontal and vertical flips, rotation up to 30 degrees, and mild colour jitter (brightness and contrast 0.2, saturation 0.1, hue 0.02). Dermoscopic lesions have no canonical orientation, so flips and rotations add label-preserving variety; geometric and mild colour augmentation are among the most effective augmentations for skin lesion analysis [11]. Colour jitter is kept mild because colour (blue-white veil, multiple browns) is diagnostically meaningful for melanoma.
+- **No hair removal, cropping of the dermatoscope frame or colour constancy** were applied, so that the failure autopsy could test whether the models rely on such artefacts (Section 8).
+
+### 4.3 Training, validation and test splits
+
+| Split | Images | Melanoma rate | ID groups | IP / HAM / dummy |
+|---|---|---|---|---|
+| Train | 17,253 (70.4%) | 21.2% | 10,463 | 46.0 / 10.2 / 43.9% |
+| Validation | 3,687 (15.1%) | 21.5% | 2,240 | 46.0 / 10.1 / 43.9% |
+| Test | 3,553 (14.5%) | 22.9% (814) | 2,243 | 43.9 / 10.9 / 45.3% |
+
+---
+
+## 5. Method
+
+### 5.1 Models
+
+| | Baseline | Siamese |
+|---|---|---|
+| Backbone | ImageNet-pretrained ResNet-18, final layer removed (512 features) | same |
+| Head | `Linear(512 -> 2)` | `Linear(512 -> 256) -> ReLU -> Linear(256 -> 128)`, L2-normalised |
+| Training input | single images | image pairs, both through the same weights |
+| Loss | cross-entropy with inverse-frequency class weights [0.63, 2.36] | contrastive loss, margin 1.0 |
+| Prediction | softmax of logits / T | distance-weighted kNN vote over the training bank |
+| Trainable parameters | 11,177,538 | 11,340,736 |
+
+**Contrastive loss** [3] for a pair with embedding distance d and label s (1 = same class):
+
+L = s * d^2 + (1 - s) * max(0, m - d)^2, with margin m = 1.0, averaged over the batch.
+
+Embeddings have length 1, so distances lie in [0, 2] and the margin of 1.0 is meaningful across images.
+
+**Pair sampling.** Each epoch draws 17,253 fresh pairs. Each pair first picks the anchor class with probability 0.5, then a same-class or different-class partner with probability 0.5, so the four pair types (melanoma-melanoma, melanoma-benign, benign-benign, benign-melanoma) each make up about 25% of an epoch. This oversamples melanoma anchors (21% of images, 50% of anchors) and balances the loss.
+
+**Training.** AdamW, learning rate 1e-4, batch size 32, up to 20 epochs, early stopping when the validation AUROC has not improved for 5 epochs; the checkpoint with the best validation AUROC is kept. For the Siamese model, validation AUROC is computed by embedding the training bank and classifying validation images with a 5-nearest-neighbour vote, i.e. the way the model is used, rather than from the pair loss.
+
+### 5.2 Confidence, calibration and the reject rule
+
+- **Melanoma probability p.** Baseline: softmax of the logits divided by a temperature T. Siamese: among the k nearest training embeddings, each neighbour votes with weight 1/distance; p is the weighted share of melanoma votes.
+- **Class-balanced vote.** The training bank is 79% benign, so in a plain vote an ambiguous lesion is surrounded mostly by benign neighbours simply because there are more of them. Optionally, each melanoma neighbour's vote is multiplied by n_benign / n_melanoma = 3.71, the kNN analogue of the baseline's class-weighted loss.
+- **Confidence** is the probability of the predicted class, max(p, 1 - p), in [0.5, 1]; the decision threshold for the class is 0.5.
+- **Temperature scaling** [4]: T is fitted on validation logits by minimising the negative log-likelihood (LBFGS on log T). It is applied to the baseline only; the Siamese vote has no logits, and with two classes a monotone rescaling cannot change the ranking of its confidences anyway.
+- **Reject rule.** Auto-decide a case if its confidence is at least t, otherwise refer it. t is the *smallest* threshold for which melanoma recall among the auto-decided validation cases is at least 0.95, i.e. the one that automates the most cases while meeting the safety target. If no threshold reaches the target, every case is referred.
+
+### 5.3 What is tuned on validation, and how
+
+| Setting | Model | Candidates | Selection rule (validation only) | Chosen |
+|---|---|---|---|---|
+| Best epoch | both | every epoch | highest validation AUROC | baseline epoch 7, Siamese epoch 2 |
+| Temperature T | baseline | continuous | minimum negative log-likelihood | 1.126 |
+| k and vote | Siamese | k in {3, 5, 10, 15, 20, 25, 30, 50, 75, 100, 150, 200} x {plain, balanced} | lowest referral rate that meets the 95% recall target, ties broken by AURC | k = 25, balanced |
+| Reject threshold t | both | every distinct confidence | smallest t with auto-decided melanoma recall ≥ 0.95 | baseline 0.773, Siamese 0.764 |
+
+The k and vote are chosen by the operational goal (refer as few cases as possible while staying safe) rather than by AURC. AURC alone would always pick the plain vote, which can never meet the recall target (Figure 3).
+
+![k tuning on validation](images/siamese_k_tuning.png)
+
+*Figure 3. Siamese tuning on validation. Left: AURC (lower is better). Right: share of cases referred at the 95% recall target. The plain vote ranks errors better (lower AURC) but has to refer every case at every k; the balanced vote makes automation possible from k = 15 upwards.*
+
+| Vote | k | Val AURC | Val AUROC | Val melanoma recall | Val referred |
+|---|---|---|---|---|---|
+| plain | 5 (training) | 0.057 | 0.895 | 0.704 | 100% |
+| plain | 150 (best AURC) | 0.032 | 0.919 | 0.679 | 100% |
+| balanced | 15 | 0.057 | 0.916 | 0.876 | 28.2% |
+| **balanced** | **25 (chosen)** | **0.058** | **0.919** | **0.880** | **24.8%** |
+| balanced | 100 | 0.057 | 0.919 | 0.880 | 32.2% |
+
+The vote weight changes p monotonically, so it never changes AUROC; it moves cases across the 0.5 decision boundary, which raises melanoma recall from about 0.70 to 0.88 at the cost of more false alarms (hence the higher AURC).
+
+### 5.4 Metrics
+
+- **Discrimination:** accuracy, per-class precision and recall, macro-F1, AUROC, PR-AUC (average precision) and the confusion matrix, overall and per ID source.
+- **Confidence:** AUROC of confidence for separating correct from wrong predictions; expected calibration error with 15 bins [4, 9]; risk-coverage curve and its area AURC [5]. In AURC, tied confidences are given the error rate of their whole tied group, because no threshold can split a tie; this matters for the Siamese model, which has many cases at exactly 1.0.
+- **Reject rule:** referral rate, melanoma recall and accuracy among auto-decided cases, melanomas missed by automation, and system sensitivity if every referred case is diagnosed correctly by the specialist.
+- **Resources:** trainable parameters, peak training GPU memory, training time and median single-image latency (batch size 1, after warm-up, including the kNN search over all 17,253 bank embeddings).
+
+---
+
+## 6. Results: Benchmarking Against the Baseline
+
+All numbers are on the same held-out test split of **3,553 images (814 melanomas)**, with every setting frozen beforehand on validation.
+
+### 6.1 Training curves
+
+| ![Baseline training curves](images/baseline_curves.png) | ![Siamese training curves](images/siamese_curves.png) |
+|---|---|
+| *Baseline: weighted cross-entropy and validation AUROC. Best validation AUROC 0.928 at epoch 7; early-stopped after 12 epochs.* | *Siamese: contrastive loss and validation kNN AUROC (k = 5). Best 0.895 at epoch 2; early-stopped after 7 epochs.* |
+
+In both models the training loss keeps falling while the validation loss stops improving after a few epochs, so early stopping on validation AUROC is needed. The Siamese validation AUROC plateaus early: after epoch 2 the encoder separates the training pairs better (pair loss 0.195 to 0.161) without improving the neighbourhoods of validation images.
+
+### 6.2 Discrimination
+
+| Metric (test) | Baseline | Siamese |
+|---|---|---|
+| Accuracy | **0.838** | 0.820 |
+| AUROC | **0.933** | 0.909 |
+| PR-AUC | **0.829** | 0.781 |
+| Macro-F1 | **0.799** | 0.779 |
+| Precision / recall: benign | 0.954 / **0.830** | 0.946 / 0.813 |
+| Precision / recall: melanoma | **0.602** / **0.866** | 0.573 / 0.845 |
+| Confusion matrix [[TN, FP], [FN, TP]] | [[2273, 466], [109, 705]] | [[2226, 513], [126, 688]] |
+
+![ROC and precision-recall curves](images/roc_pr_curves.png)
+
+*Figure 4. ROC and precision-recall curves on the test split. The baseline dominates at almost every operating point.*
+
+### 6.3 Confidence and calibration
+
+| Metric (test) | Baseline (T = 1.126) | Siamese (k = 25, balanced) |
+|---|---|---|
+| Confidence AUROC (correct vs wrong), higher is better | **0.810** | 0.803 |
+| ECE, lower is better | **0.023** | 0.065 |
+| AURC, lower is better | **0.052** | 0.062 |
+| Test cases with confidence exactly 1.0 | 0% | **42.3%** |
+| Errors among cases with confidence ≥ 0.99 | 1 of 402 | **21 of 1,512** |
+
+| ![Reliability diagram](images/reliability_diagram.png) | ![Risk-coverage curves](images/risk_coverage.png) |
+|---|---|
+| *Figure 5. Reliability diagram. The baseline follows the diagonal; the Siamese vote is irregular and mostly overconfident.* | *Figure 6. Risk-coverage. The Siamese curve starts at about 1.4% error rather than 0: its most confident block of tied cases already contains errors.* |
+---
+
+## References
+
+1] G. Koch, R. Zemel, and R. Salakhutdinov, "Siamese neural networks for one-shot image recognition," in *ICML Deep Learning Workshop*, 2015.  
 [2] K. He, X. Zhang, S. Ren, and J. Sun, "Deep residual learning for image recognition," in *Proc. CVPR*, 2016.  
 [3] R. Hadsell, S. Chopra, and Y. LeCun, "Dimensionality reduction by learning an invariant mapping," in *Proc. CVPR*, 2006.  
 [4] C. Guo, G. Pleiss, Y. Sun, and K. Q. Weinberger, "On calibration of modern neural networks," in *Proc. ICML*, 2017.  
@@ -134,5 +375,5 @@ The split, the metrics and the reject-rule protocol stay fixed throughout, so an
 ## AI Declaration:
 1. AI was used to add print statements to test and demonstrate that models are working as intentded before training and evaluation is completed. I did not know how I could check this with mock data so I turned to AI and it explained and help me add the prints at the end of `modules.py`
 2. Ai was asked for suggestion on how to layout the plan i had in mind. It suggested me to add extra file `evaluate.py` and also recommended some  functions i should implement such as tyemperature scaling and aroc etc however, eventually my mental model did not align with the structure it recommendded so i refactored the entire codebase into how I had structured in my mind
-3. Used AI's assistance to enhance the performance of KNN for begign as during autospy i found that the confidence is very low because of the imbalanced class labels. I provided the issue and the context of what i am building and AI gave me example code and I adapted that into mt training. 
+3. Used AI's assistance to enhance the performance of KNN for begign as during autospy i found that the confidence is very low because of the imbalanced class labels. I provided the issue and the context of what i am building and AI gave me example code and I adapted that into mt training.
 4. Inspiration for Autopsy and psuedocode for that was receieved from AI
