@@ -51,13 +51,13 @@ flowchart LR
 
 ### Headline result
 
-On the held-out test split (3,553 images, 814 melanomas), the Siamese model reaches **0.820 accuracy and 0.909 AUROC**, meeting the task's accuracy target, but the baseline is better on every discrimination and confidence metric (0.838 accuracy, 0.933 AUROC, ECE 0.023 vs 0.065, AURC 0.052 vs 0.062). The Siamese confidence is **not** a better indicator of correctness as 42% of its test predictions have confidence exactly 1.0, and these include confidently missed melanomas. The baseline's reject rule meets the safety target as melanoma recall among auto-decided cases 0.958 with 34% referred. On the other hand, the Siamese rule refers fewer cases (26%) but misses the target (0.921). Overall, Both models perform far worse on the realistic `IP` subset of real patients. The recommendation is not to advance the Siamese model as the triage engine.
+On the held-out test split (3,553 images, 814 melanomas), the Siamese model reaches **0.820 accuracy and 0.909 AUROC**, meeting the task's accuracy target, but the baseline is better on every discrimination and confidence metric (0.838 accuracy, 0.933 AUROC, ECE 0.023 vs 0.065, AURC 0.052 vs 0.062). The Siamese confidence is **not** a better indicator of correctness: 42% of its test predictions have confidence exactly 1.0, and these include confidently missed melanomas. The baseline's reject rule meets the safety target (melanoma recall among auto-decided cases 0.958 with 34% referred); the Siamese rule refers fewer cases (26%) but misses the target (0.921). Both models perform far worse on the realistic `IP` subset of real patients. The recommendation (Section 9) is not to advance the Siamese model as the triage engine.
 
 ---
 
 ## 2. Feasibility Review
 
-**Project:** Siamese metric-learning classifier with a reject option for melanoma triage  
+**Project:** Siamese metric-learning classifier with a reject option for melanoma triage
 **Dataset:** [ISIC Melanoma Dataset, resized to 224x224 (Kaggle)](https://www.kaggle.com/datasets/roua91/isic-melanoma-dataset-resized-to-224x224)
 
 ### 2.1 User Need, Scope and Acceptance Criteria
@@ -220,6 +220,33 @@ Useful extra options: `train.py --model siamese --skip_training` re-tunes and re
 - **Verified:** for the final run, `outputs/` was emptied and the split, both trainings, tuning and testing were run from scratch. The test metrics matched the previous full run to three decimal places for both models. GPU kernels on MPS/CUDA are not guaranteed to be bit-for-bit deterministic, so small differences are possible on other hardware.
 - **Checks on the inference path:** `predict.py` reproduces the test-step probabilities for the same images (maximum difference 3e-8), and the cached reference bank is invalidated automatically when the checkpoint changes.
 
+### 3.6 Example input and output
+
+Input: one or more test images (by `isic_id`). Output of `python predict.py --model siamese`:
+
+```text
+Running the trained siamese model: k 25, vote balanced, temperature None, reject threshold 0.764
+
+isic_id        source      true      pred  p(mel)  conf decision
+ISIC_0033837  dummy    benign    benign   0.230 0.770     auto
+nearest training images: ben 0.15, ben 0.16, ben 0.16, ben 0.17, ben 0.17
+              
+ISIC_0033511  dummy    benign  melanoma   0.583 0.583    REFER
+nearest training images: ben 0.08, ben 0.08, ben 0.09, mel 0.09, ben 0.10
+
+ISIC_0066921  dummy  melanoma  melanoma   1.000 1.000     auto
+nearest training images: mel 0.04, mel 0.05, mel 0.05, mel 0.05, mel 0.06
+figure is stored in outputs/predict_siamese.png
+```
+
+The second case shows the reject rule working as intended as the model's vote is split, it would have been wrong, and it is referred. The baseline equivalent (`python predict.py --model baseline`) is shown in Figure 2.
+
+<img src="images/predict_baseline.jpg" alt="Baseline predictions on the same six test images" width="300">
+
+*Figure 2. Baseline on the same six random test images. It refers four of them, all correctly classified but with confidence below its threshold of 0.773.*
+
+---
+
 ## 4. Data, Pre-processing and Splits
 
 ### 4.1 Data audit (from `python dataset.py`)
@@ -249,6 +276,13 @@ The Kaggle images are already resized to 224x224, the input size of ResNet-18, s
 | Validation | 3,687 (15.1%) | 21.5% | 2,240 | 46.0 / 10.1 / 43.9% |
 | Test | 3,553 (14.5%) | 22.9% (814) | 2,243 | 43.9 / 10.9 / 45.3% |
 
+**Justification.**
+- **Grouped by `patient_id`.** The split uses `StratifiedGroupKFold` with 20 folds, of which 14 form the training set, 3 the validation set and 3 the test set, and every image that shares a `patient_id` is kept in the same fold. This matters because a single `IP` patient can contribute up to 43 images. This is because if those images were spread across splits, the model could learn to recognise the patient's skin, lighting or camera instead of the lesion itself, and the test scores would be inflated by images it had effectively already seen. Grouping therefore makes the true-patient (`IP`) subset strictly patient-disjoint. The same guarantee cannot be given for the `HAM` and `dummy` images, because their identifiers describe a lesion or a placeholder rather than a person, so it is claimed only for the `IP` subset and the remaining risk is stated as a limitation.
+- **Stratified by class x ID source** (six strata). The sources have very different melanoma rates (5.2%, 24.4%, 37.7%), so an unstratified split could give the test set a different source mix and change every metric for reasons unrelated to the model.
+- **Different roles for each split.** Training data fits the weights where as validation data is used for everything that is *chosen* such as the best epoch (early stopping on validation AUROC), the baseline temperature, the Siamese k and vote, and the reject threshold. The test split is used only to measure the final, frozen models. This is because tuning on the training set instead would give overconfident settings, because the model has already fit those images.
+- **15% for testing** gives 814 test melanomas, enough for a 95% confidence interval of about plus or minus 2 to 3 points on the reject rule's recall, which is the quantity the safety criterion depends on.
+- **Pairs are generated within one split only**, and the kNN reference bank contains training images only, so no test image is ever used as a reference.
+
 ---
 
 ## 5. Method
@@ -264,13 +298,13 @@ The Kaggle images are already resized to 224x224, the input size of ResNet-18, s
 | Prediction | softmax of logits / T | distance-weighted kNN vote over the training bank |
 | Trainable parameters | 11,177,538 | 11,340,736 |
 
+**Pair sampling for Siamese.** Each epoch draws 17,253 fresh pairs. Each pair first picks the anchor class with probability 0.5, then a same-class or different-class partner with probability 0.5, so the four pair types (melanoma-melanoma, melanoma-benign, benign-benign, benign-melanoma) each make up about 25% of an epoch. This oversamples melanoma anchors (21% of images, 50% of anchors) and balances the loss.
+
 **Contrastive loss** [3] for a pair with embedding distance d and label s (1 = same class):
 
 L = s * d^2 + (1 - s) * max(0, m - d)^2, with margin m = 1.0, averaged over the batch.
 
 Embeddings have length 1, so distances lie in [0, 2] and the margin of 1.0 is meaningful across images.
-
-**Pair sampling.** Each epoch draws 17,253 fresh pairs. Each pair first picks the anchor class with probability 0.5, then a same-class or different-class partner with probability 0.5, so the four pair types (melanoma-melanoma, melanoma-benign, benign-benign, benign-melanoma) each make up about 25% of an epoch. This oversamples melanoma anchors (21% of images, 50% of anchors) and balances the loss.
 
 **Training.** AdamW, learning rate 1e-4, batch size 32, up to 20 epochs, early stopping when the validation AUROC has not improved for 5 epochs; the checkpoint with the best validation AUROC is kept. For the Siamese model, validation AUROC is computed by embedding the training bank and classifying validation images with a 5-nearest-neighbour vote, i.e. the way the model is used, rather than from the pair loss.
 
@@ -357,23 +391,178 @@ In both models the training loss keeps falling while the validation loss stops i
 | ![Reliability diagram](images/reliability_diagram.png) | ![Risk-coverage curves](images/risk_coverage.png) |
 |---|---|
 | *Figure 5. Reliability diagram. The baseline follows the diagonal; the Siamese vote is irregular and mostly overconfident.* | *Figure 6. Risk-coverage. The Siamese curve starts at about 1.4% error rather than 0: its most confident block of tied cases already contains errors.* |
+
+The Siamese confidence ranks its own errors about as well as the baseline's by confidence AUROC (0.803 vs 0.810) but worse by AURC. However, it is not accurate as it is certain (confidence 1.0, all 25 neighbours of one class) on 42% of test images, and among the 1,512 cases with confidence of at least 0.99 it is wrong 21 times, including missed melanomas, representing the "stubbornly overconfident" behaviour revealed in the dilemma. Once all k neighbours share a class, the vote is exactly 1.0 however far away those neighbours are, so nothing in the model expresses doubt for an image that falls inside a single-class cluster. This could be due to several limitations such as low ratio 
+
+Temperature scaling barely changed the baseline (T = 1.126; validation ECE 0.026 before and 0.027 after). Class-weighted training with early stopping had already left the baseline well calibrated, and temperature scaling minimises log-loss rather than ECE, so a tiny ECE change in either direction is expected.
+
+### 6.4 Reject rule
+
+| Test | Baseline | Siamese |
+|---|---|---|
+| Threshold | 0.773 | 0.764 |
+| Cases referred | 34.3% | **25.6%** |
+| Accuracy of auto-decided cases | **0.931** | 0.891 |
+| Melanoma recall among auto-decided (target ≥ 0.95) | **0.958** (531 / 554; 95% CI 0.938 to 0.972) | 0.921 (563 / 611; 95% CI 0.897 to 0.940) |
+| Melanomas missed by automation | **23** | 48 |
+| System sensitivity (referred cases diagnosed correctly) | **0.972** | 0.941 |
+
+On validation both rules met the target by construction (0.951 for each). On test the baseline's rule held (0.958) while the Siamese rule fell to 0.921, and its confidence interval excludes 0.95, so this is a real shortfall rather than noise. The Siamese threshold sits next to a large tied block of confidences near 1.0 and k was chosen as the single lowest-referral point of a noisy validation curve (Figure 3); both make its validation estimate optimistic.
+
+### 6.5 Results per ID source
+
+| Source (test images, melanomas) | Model | Accuracy | AUROC | PR-AUC | Melanoma recall | Referred | Auto-decided melanoma recall | Melanomas missed by automation |
+|---|---|---|---|---|---|---|---|---|
+| IP (1,558, 92) | Baseline | 0.919 | 0.882 | 0.413 | 0.554 | 22.8% | **0.558** | 19 |
+| | Siamese | 0.900 | 0.841 | 0.351 | 0.511 | 17.8% | **0.569** | 22 |
+| HAM (386, 88) | Baseline | 0.858 | 0.942 | 0.838 | 0.830 | 29.3% | 0.982 | 1 |
+| | Siamese | 0.837 | 0.922 | 0.759 | 0.807 | 23.8% | 0.933 | 4 |
+| dummy (1,609, 634) | Baseline | 0.755 | 0.906 | 0.873 | 0.916 | 46.5% | 0.993 | 3 |
+| | Siamese | 0.739 | 0.874 | 0.833 | 0.899 | 33.4% | 0.956 | 22 |
+
+The sources differ so much in melanoma rate that each needs its own reference point before the numbers can be compared:
+
+| Source | Melanoma rate (test) | Accuracy of always predicting "benign" | PR-AUC of a random classifier | Melanomas in the training split |
+|---|---|---|---|---|
+| IP | 5.9% | **0.941** | 0.059 | 421 (11%) |
+| HAM | 22.8% | 0.772 | 0.228 | 425 (12%) |
+| dummy | 39.4% | 0.606 | 0.394 | 2,815 (77%) |
+
+`IP` has the highest accuracy, yet both models score *below* the trivial "always benign" rule on it (0.919 and 0.900 against 0.941), because 94% of `IP` images are benign. On `HAM` and `dummy` the models clearly beat that rule. However, prevalence-independent and prevalence-adjusted metrics depicts AUROC is lowest on `IP` (0.882 / 0.841), and its PR-AUC of 0.413 is about 7 times chance but still means most melanoma alarms on `IP` are false.
+
+Melanoma recall is about 0.90 on `dummy` but only 0.51 to 0.55 on `IP` where roughly every second real-patient melanoma is called benign. Three causes are visible in the data i.e. 77% of the training melanomas come from `dummy`, so the models mostly learned what a melanoma looks like in the older archives; those archives carry acquisition cues such as the black dermatoscope circle that correlate with the label (Section 8); and `IP` melanomas come from screening and are often small, early and subtle, the benign mimicry the task describes.
+
+Moreover, the reject rule is uncertain in the wrong places as it refers the most cases where the models are already safe (for example: `dummy`, 46.5% referred, auto-decided recall 0.993 for the baseline) and the fewest where they are dangerous (`IP`, 22.8% referred, auto-decided recall 0.558). Most `IP` images look typically benign, so the models are confident on them, including on the `IP` melanomas they miss: confidence tracks how typical an image looks, not how likely the prediction is to be wrong. As a result the automation silently misses 19 of 92 `IP` melanomas (baseline) or 22 of 92 (Siamese), compared with 3 of 634 `dummy` melanomas for the baseline. The auto-decided `IP` estimates rest on only 43 to 51 melanomas (95% interval roughly 0.41 to 0.70), but even the upper end is far below the 0.95 target.
+
+**The pooled result is a `dummy` result.** 78% of the test melanomas are `dummy` (634 of 814), so the pooled auto-decided recall of 0.958 for the baseline is dominated by that source, while the `IP` melanomas (11%) barely move it. The pooled 95% target is met by the population mix, not by the model being safe on every kind of patient. In a clinic whose patients resemble `IP`, at an even lower melanoma rate, the target would fail for both models.
+
+**Overall: Baseline vs Siamese.** 
+The baseline is better on every source for AUROC, PR-AUC and melanoma recall. The Siamese model refers fewer cases on every source, but pays for it in misses, most visibly on `dummy` (22 missed melanomas against 3): these are its confidence-1.0 errors, where all 25 neighbours sit in a tight cluster of the other class. On `IP` both models are equally poor, so the real-patient problem comes from the data rather than the architecture. This motivates the per-source thresholds and shortcut removal recommended in Section 9.
+
+### 6.6 Acceptance criteria
+
+This table compares the test results with the five acceptance criteria set before training in Section 2.1. Each verdict uses the held-out test split, which was evaluated only once, after the epoch, temperature, k, vote and reject threshold had all been fixed on validation data.
+
+| Criterion | Target | Result | Verdict |
+|---|---|---|---|
+| 1. Leakage-free data | no shared patient IDs; duplicates removed; reproducible split | 0 patient overlap, 0 exact duplicates, 0 near-duplicates across splits, pairs within one split, split saved and regenerated identically; patient guarantee claimed for `IP` only | **Met** |
+| 2. Discrimination | Siamese test accuracy about 0.80, all metrics reported vs baseline | 0.820 accuracy, 0.909 AUROC; all metrics reported; below the baseline on every metric | **Met** (but worse than baseline) |
+| 3. Confidence | Siamese ranks its errors at least as well as the calibrated baseline | confidence AUROC 0.803 vs 0.810; AURC 0.062 vs 0.052; ECE 0.065 vs 0.023 | **Not met** |
+| 4. Safe reject rule | auto-decided melanoma recall ≥ 0.95 with ≤ 50% referred | Siamese 0.921 at 25.6% referred; baseline 0.958 at 34.3% | **Not met by Siamese** (met by baseline) |
+| 5. Resources | ≤ 8 GiB, ≤ 2 h per model, ≤ 50 ms per image | 2.24 GiB, 22.6 min, 3.8 ms (Siamese) | **Met** |
+
+Criteria 3 was not met because the Siamese confidence is a weighted vote of the 25 nearest training images, not a learned probability. When all 25 neighbours share a class, the vote is exactly 1.0 however far away they are, so 42.3% of test images get confidence 1.0 and the model cannot rank errors inside that tied block (21 errors among its 1,512 cases at confidence ≥ 0.99, against 1 of 402 for the baseline). The vote also had no calibration step equivalent to the baseline's temperature scaling, which explains the higher ECE (0.065 vs 0.023). 
+
+Criteria 3 was not met because the threshold was chosen to give exactly 0.95 recall on validation, so it had no safety margin, and the Siamese validation estimate was optimistic for two reasons. First, the threshold sits next to the large tied block of confidences near 1.0, so a small shift in where test images fall moves many cases across it. Second, k was chosen as the single lowest-referral point of a noisy validation curve (Figure 3). No threshold below 1.0 can catch the confident misses and a melanoma surrounded by 25 benign neighbours scores 1.0 and is always auto-decided. On test the Siamese rule missed 48 melanomas, and its 95% confidence interval (0.897 to 0.940) excludes 0.95, so the shortfall is real rather than noise. The baseline met the target with the same procedure because its confidences are continuous and better ranked, at the cost of referring more cases (34.3% vs 25.6%).
+
 ---
 
-## References
+## 7. Resource Profiling
 
-1] G. Koch, R. Zemel, and R. Salakhutdinov, "Siamese neural networks for one-shot image recognition," in *ICML Deep Learning Workshop*, 2015.  
-[2] K. He, X. Zhang, S. Ren, and J. Sun, "Deep residual learning for image recognition," in *Proc. CVPR*, 2016.  
-[3] R. Hadsell, S. Chopra, and Y. LeCun, "Dimensionality reduction by learning an invariant mapping," in *Proc. CVPR*, 2006.  
-[4] C. Guo, G. Pleiss, Y. Sun, and K. Q. Weinberger, "On calibration of modern neural networks," in *Proc. ICML*, 2017.  
-[5] Y. Geifman and R. El-Yaniv, "Selective classification for deep neural networks," in *Proc. NeurIPS*, 2017.  
-[6] V. Rotemberg *et al.*, "A patient-centric dataset of images and metadata for identifying melanomas using clinical context," *Scientific Data*, vol. 8, 2021.  
+Apple M5 Pro laptop GPU (PyTorch 2.8.0, MPS backend), batch size 32, 4 DataLoader workers.
+
+| | Baseline | Siamese | Siamese / baseline |
+|---|---|---|---|
+| Trainable parameters | 11,177,538 | 11,340,736 | 1.01x |
+| Peak training GPU memory | 1.23 GiB | 2.24 GiB | 1.8x |
+| Time per epoch | 110 s | 193 s | 1.75x |
+| Epochs until early stopping | 12 | 7 | |
+| Total training time | 22 min of compute (29.6 min wall clock, including one 7.5-minute pause while the laptop slept during epoch 8) | 22.6 min | |
+| Median single-image latency (batch 1) | 3.0 ms | 3.8 ms (incl. kNN search over 17,253 embeddings) | 1.3x |
+| Extra inference storage | none | reference bank: 17,253 x 128 floats (about 9 MB) | |
+
+Both models fit comfortably on a laptop. The Siamese model costs almost twice the training memory and time per epoch (every item is a pair of images), needs a reference bank that grows with the training set, and its latency depends on the bank size, although at this scale it stays two orders of magnitude below the 50 ms limit.
+
+---
+
+## 8. Failure Case Autopsy
+
+The failure cases are the **most confident errors** on the test split (the dangerous ones: the model was sure, wrong and auto-decided), chosen automatically by `python predict.py --autopsy` from the saved test predictions: the three most confident missed melanomas and the two most confident false alarms.
+
+![Siamese failure cases with their nearest training images](images/autopsy_siamese.jpg)
+
+*Figure 7. Siamese autopsy: each failure (left) with its five nearest training images. All five were auto-decided.*
+
+| # | Case | Truth / prediction | Confidence | What the evidence shows | Failure trigger |
+|---|---|---|---|---|---|
+| 1 | ISIC_1870415 (IP) | melanoma / benign | 1.00, auto | A small brown lesion next to a **ruler scale**. All five nearest training images are benign lesions photographed with the same ruler and framing. | **Acquisition artefact shortcut:** the embedding matches the imaging setup (ruler, framing, small central lesion) rather than the lesion's structure. |
+| 2 | ISIC_4967586 (IP) | melanoma / benign | 1.00, auto | A large, ill-defined, light-brown lesion filling the frame; neighbours are diffuse benign naevi with a similar reticular pattern. | **Genuine mimicry** between an early melanoma and an atypical naevus, the ambiguous case the triage system exists for; the model shows it as certain because all 25 neighbours are benign. |
+| 3 | ISIC_0033603 (dummy) | melanoma / benign | 1.00, auto | A pink-red, vascular lesion with little pigment; neighbours are pink benign lesions (one with blood and a hair). | **Hypo-pigmented (amelanotic-looking) melanoma:** the learned similarity is driven by colour, and pink melanomas are rare in the bank, so the nearest references are benign. |
+| 4 | ISIC_0070280 (dummy) | benign / melanoma | 0.99, auto | Pigmented lesion inside the **black circular dermatoscope frame**; all five neighbours are melanomas with the same frame. | **Source shortcut:** the framed `dummy` images are 38% melanoma, and the embedding clusters by frame, as predicted by Risk 2 of the feasibility review. |
+| 5 | ISIC_0065647 (dummy) | benign / melanoma | 0.99, auto | Benign lesion with a dark blue-grey centre, again inside the circular frame; neighbours are framed melanomas with blue-white structures. | **Shortcut plus melanoma-like colour:** blue-grey colour and the frame together outweigh the lesion's benign structure. |
+
+**The baseline fails on different images for related reasons** (Figure 8, all `IP` cases): two of its three most confident missed melanomas are almost hidden behind **dense hair**, the third is a faint, low-contrast pigmented lesion, and its false alarms are a benign lesion with a strongly **vascular, reticular** pattern and a pigmented lesion beside a **ruler**. Hair and rulers are the artefacts named in the task sheet.
+
+<img src="images/autopsy_baseline.jpg" alt="Baseline failure cases" width="300">
+
+*Figure 8. Baseline autopsy (`python predict.py --model baseline --autopsy`).*
+
+**Where errors cluster** (`--autopsy` also prints this table; wrong but auto-decided = errors the reject rule let through):
+
+| Source | Siamese error rate | Siamese wrong but auto-decided | Baseline error rate | Baseline wrong but auto-decided |
+|---|---|---|---|---|
+| IP | 0.100 | 63 | 0.081 | 39 |
+| HAM | 0.163 | 24 | 0.142 | 14 |
+| dummy | 0.261 | 202 | 0.245 | 109 |
+
+**Diagnosis.** (1) Both models partly rely on acquisition cues (dermatoscope frame, ruler, hair) that correlate with the source and therefore with the label in this merged dataset. (2) The Siamese model makes this visible, because its "evidence" images share the artefact rather than the pathology, but it also makes it worse: a kNN vote over a cluster of look-alike images produces confidence 1.0, so these errors are auto-decided instead of referred. (3) On real-patient (`IP`) images both models are weak on melanoma, and the reject rule does not protect these patients.
+
+---
+
+## 9. Recommendation to the Project Manager
+
+**Do not advance the Siamese model as the triage engine.**
+
+| Question | Evidence | Answer |
+|---|---|---|
+| Is the Siamese confidence a better signal of correctness? | Confidence AUROC 0.803 vs 0.810, AURC 0.062 vs 0.052, ECE 0.065 vs 0.023; 21 errors at confidence ≥ 0.99 vs 1 | **No.** It is as good or worse, and overconfident on 42% of cases. |
+| Can it safely automate the confident cases? | Recall among auto-decided 0.921 (target 0.95), 48 melanomas missed by automation vs 23 | **No**, not to the agreed safety target. |
+| Does it justify its extra cost? | 1.8x training memory, 1.75x time per epoch, a growing reference bank; lower accuracy, AUROC and PR-AUC | **No.** |
+| Does the simpler baseline solve the problem? | Pooled target met (0.958 at 34% referred), but auto-decided melanoma recall only 0.56 on `IP` patients | **Not yet.** It passes on paper because of the population mix, not on the patients that matter. |
+
+**Recommended next steps, in order:**
+1. **Use the calibrated baseline with its reject rule as the reference design**, for a further retrospective study only, not for clinical use.
+2. **Set the referral threshold per population.** Re-fit it on validation data that matches the target clinic (ISIC 2020-like, < 2% melanoma), or require the 95% recall target separately for each image source. On `IP` images the current threshold is far from safe.
+3. **Remove acquisition shortcuts** before any further model comparison: crop or mask the dermatoscope frame, apply hair removal, and evaluate on a single acquisition source.
+4. **Keep the Siamese nearest-neighbour view as an audit and explanation tool.** Showing the closest reference lesions exposed the ruler and frame shortcuts at a glance (Figure 7). That is valuable for model auditing and clinician trust even though the kNN vote should not make the decision.
+5. If metric learning is revisited, try hard-negative mining (triplet loss) and a confidence that also uses absolute distance to the neighbours, so that a query far from every reference is referred instead of being called certain.
+
+**Trade-off summary.** The Siamese design buys interpretability (visible evidence) at the price of worse discrimination, worse calibration, a higher miss rate under automation and about twice the training cost. For a safety-critical triage task, the cheaper calibrated classifier is the better operational choice, and the remaining risk is not the architecture but the dataset's source shortcuts and the low recall on real-patient images.
+
+---
+
+## 10. Limitations and Future Work
+
+- **Not enough melanoma examples.** The training split has about 3.7 benign images for every melanoma, and most of its melanomas come from the `dummy` archive source (2,815 of 3,661) and only 421 come from real patients (`IP`). Class weights and the balanced vote rebalance the decision, but they cannot add variety: the model sees few distinct melanomas from real patients, so its melanoma neighbourhoods in the embedding space are sparse and dominated by one source. This is the most likely cause of the low `IP` melanoma recall (Section 6.5) and of the confident misses behind criteria 3 and 4. More real-patient melanomas, for example from ISIC 2019 or 2020, would address it more directly than further tuning.
+- **Patient-level separation is guaranteed only for `IP` images.** `HAM` and `dummy` images have no patient ID; the near-duplicate check found no copies across splits, but different photographs of the same patient could still be split apart.
+- **Prevalence.** The dataset is 21.5% melanoma; real screening is below 2%. Precision, PR-AUC and the referral rate will change in a clinic, and the threshold must be re-fitted there.
+- **Single training run per model** (one seed, one learning rate, margin 1.0). The rerun reproduced the same numbers, but no variance across seeds or hyperparameters was measured.
+- **The confidence measure for the Siamese model** uses only the vote share among neighbours, not how far away they are; a distance-aware confidence is a natural next step.
+- **Future work:** hair and frame removal, per-source or prevalence-adjusted thresholds, triplet loss with hard-negative mining, distance-aware confidence, and repeated runs with different seeds.
+
+
+## 12. References
+
+[1] G. Koch, R. Zemel, and R. Salakhutdinov, "Siamese neural networks for one-shot image recognition," in *ICML Deep Learning Workshop*, 2015.
+[2] K. He, X. Zhang, S. Ren, and J. Sun, "Deep residual learning for image recognition," in *Proc. CVPR*, 2016.
+[3] R. Hadsell, S. Chopra, and Y. LeCun, "Dimensionality reduction by learning an invariant mapping," in *Proc. CVPR*, 2006.
+[4] C. Guo, G. Pleiss, Y. Sun, and K. Q. Weinberger, "On calibration of modern neural networks," in *Proc. ICML*, 2017.
+[5] Y. Geifman and R. El-Yaniv, "Selective classification for deep neural networks," in *Proc. NeurIPS*, 2017.
+[6] V. Rotemberg *et al.*, "A patient-centric dataset of images and metadata for identifying melanomas using clinical context," *Scientific Data*, vol. 8, 2021.
 [7] Kaggle, "ISIC Melanoma Dataset (resized to 224x224)," roua91. CC BY-NC 4.0.
 [8] H. Sulakhe, "siamesenetworks-pytorch: loss.py," GitHub repository. [Online]. Available: https://github.com/HarshSulakhe/siamesenetworks-pytorch/blob/master/loss.py (accessed Oct. 21, 2026). Basis of the contrastive loss implementation.
 [9] "Expected calibration error explained," jev wiki, GitHub. [Online]. Available: https://github.com/feder-cr/jev/wiki/expected-calibration-error-explained
 [10] N. Krawetz, "Kind of like that," *The Hacker Factor Blog*, 2013. Difference hash used for the near-duplicate check.
 [11] F. Perez, C. Vasconcelos, S. Avila, and E. Valle, "Data augmentation for skin lesion analysis," in *ISIC Skin Image Analysis Workshop, MICCAI*, 2018.
-## AI Declaration:
-1. AI was used to add print statements to test and demonstrate that models are working as intentded before training and evaluation is completed. I did not know how I could check this with mock data so I turned to AI and it explained and help me add the prints at the end of `modules.py`
-2. Ai was asked for suggestion on how to layout the plan i had in mind. It suggested me to add extra file `evaluate.py` and also recommended some  functions i should implement such as tyemperature scaling and aroc etc however, eventually my mental model did not align with the structure it recommendded so i refactored the entire codebase into how I had structured in my mind
-3. Used AI's assistance to enhance the performance of KNN for begign as during autospy i found that the confidence is very low because of the imbalanced class labels. I provided the issue and the context of what i am building and AI gave me example code and I adapted that into mt training.
-4. Inspiration for Autopsy and psuedocode for that was receieved from AI
+## AI Declaration
+
+AI tools were used to support specific aspects of the development and testing of this project:
+
+1. **Testing:** I used AI to understand how to verify that the models were functioning as intended before proceeding with training and evaluation. As I was unsure how to test the models using mock data, AI suggested adding particular print statements at the end of `modules.py` to inspect the outputs and confirm that the models were working as expected. I have used those statements in the main() function.
+
+2. **Code structure and implementation planning:** I used AI to discuss and refine my proposed implementation plan after `train.py`. AI suggested separating testing and validation into functionality into an additional `evaluate.py` file and recommended potential evaluation techniques, including temperature scaling and AUROC. However, the suggested structure did not align with my intended design, so I independently refactored the codebase to reflect my own understanding and preferred architecture.
+
+3. **KNN performance improvement:** During the autopsy stage, I identified that the KNN model had low confidence when predicting the benign class, which I attributed to the class imbalance in the training data. I provided AI with the relevant context and described the issue. AI suggested an example approach to address the problem, which I adapted and incorporated into my training implementation.
+
+4. **Autopsy design:** I used AI to explore ideas for the autopsy component and to obtain initial pseudocode. I used these suggestions as a starting point when developing my implementation.
+
