@@ -42,6 +42,18 @@ N_FALSE_POSITIVES = 2
 
 
 def load_settings(name):
+    """
+    Load the settings tuned on validation by train.py.
+
+    Args:
+        name (str): "baseline" or "siamese".
+
+    Returns:
+        dict: The contents of outputs/<name>_tuned.json.
+
+    Raises:
+        SystemExit: If the file does not exist (the model has not been trained).
+    """
     path = os.path.join(OUT_DIR, f"{name}_tuned.json")
     if not os.path.exists(path):
         raise SystemExit(f"{path} not found. Requires training")
@@ -50,6 +62,12 @@ def load_settings(name):
 
 
 def print_test_summary(name):
+    """
+    Print the saved full-test results of one model (--show_full_test), without re-running it.
+
+    Args:
+        name (str): "baseline" or "siamese".
+    """
     path = os.path.join(OUT_DIR, f"{name}_test_results.json")
     if not os.path.exists(path):
         print(f"no test results yet. A test run is required for this flag")
@@ -69,13 +87,38 @@ def print_test_summary(name):
 
 
 def decision(confidence, tuned):
-    """'auto' or 'REFER' with the reject threshold chosen on validation."""
+    """
+    Apply the reject threshold chosen on validation to one confidence score.
+
+    Args:
+        confidence (float): The model's confidence, max(p, 1 - p).
+        tuned (dict): Settings from <model>_tuned.json (for the reject threshold).
+
+    Returns:
+        str: "auto" if the case can be decided automatically, "REFER" otherwise (always
+            "REFER" when no threshold met the recall target).
+    """
     threshold = tuned["reject_rule_validation"]["threshold"]
     return "REFER" if threshold is None or confidence < threshold else "auto"
 
 
 def choose_rows(name, test_df, args):
-    """The test rows to show: given IDs, failure cases (--autopsy) or a random sample."""
+    """
+    Choose the test rows to show: the given IDs, the most confident errors (--autopsy) or
+    a reproducible random sample of N_RANDOM images.
+
+    Args:
+        name (str): "baseline" or "siamese".
+        test_df (pd.DataFrame): Test rows.
+        args (argparse.Namespace): Options, read for --images and --autopsy.
+
+    Returns:
+        pd.DataFrame: The chosen test rows.
+
+    Raises:
+        SystemExit: If a requested ID is not in the test split, or --autopsy is used before
+            the model's test predictions have been saved.
+    """
     if args.images:
         rows = test_df[test_df["isic_id"].isin(args.images)]
         missing = set(args.images) - set(rows["isic_id"])
@@ -101,7 +144,14 @@ def choose_rows(name, test_df, args):
 
 
 def print_errors_by_source(predictions):
-    """Test errors per ID source (README risk 2): do mistakes cluster in one data source?"""
+    """
+    Print the test errors per ID source (README risk 2), to see whether mistakes cluster
+    in one data source.
+
+    Args:
+        predictions (pd.DataFrame): Per-image test predictions from
+            <model>_test_predictions.csv.
+    """
     wrong = ~predictions["correct"]
     preds = predictions.assign(wrong=wrong,
         missed_melanoma=wrong & (predictions["target"] == 1),
@@ -122,7 +172,19 @@ def print_errors_by_source(predictions):
 
 @torch.no_grad()
 def nearest_training_images(model, rows, train_df, device):
-    """For each Siamese query, its N_NEIGHBOURS closest training images and their distances."""
+    """
+    Find the N_NEIGHBOURS closest training images to each test image in the embedding
+    space, the evidence behind a Siamese prediction.
+
+    Args:
+        model (SiameseNet): The trained Siamese network.
+        rows (pd.DataFrame): The chosen test rows.
+        train_df (pd.DataFrame): Training rows (the reference bank).
+        device (torch.device): Device to embed on.
+
+    Returns:
+        list: Per test row, a list of (training row, distance) pairs, closest first.
+    """
     bank, _ = training_bank(model, train_df, device)
     bank_rows = train_df.reset_index(drop=True) 
     query, _ = embed_all(model, loader(LesionDataset(rows, "test")), device)
@@ -133,6 +195,17 @@ def nearest_training_images(model, rows, train_df, device):
 
 
 def print_results(rows, probs, neighbours, tuned):
+    """
+    Print one line per image: true class, prediction, melanoma probability, confidence and
+    auto/REFER decision, plus its nearest training images for the Siamese model.
+
+    Args:
+        rows (pd.DataFrame): The chosen test rows.
+        probs (list): Melanoma probability per row.
+        neighbours (list or None): Per row, a list of (training row, distance); None for
+            the baseline.
+        tuned (dict): Settings from <model>_tuned.json (for the reject threshold).
+    """
     print(f"{'isic_id':>26} {'source':>6} {'true':>9} {'pred':>9} {'p(mel)':>7} {'conf':>5} {'decision':>8}")
     for r, (row, prob) in enumerate(zip(rows.itertuples(), probs)):
         predicted = int(prob >= 0.5)
@@ -145,6 +218,19 @@ def print_results(rows, probs, neighbours, tuned):
 
 
 def show(name, rows, probs, neighbours, tuned, path):
+    """
+    Save a figure with one row per test image: the image titled with its prediction (green
+    if correct, red if wrong) and, for the Siamese model, its nearest training images.
+
+    Args:
+        name (str): "baseline" or "siamese".
+        rows (pd.DataFrame): The chosen test rows.
+        probs (list): Melanoma probability per row.
+        neighbours (list or None): Per row, a list of (training row, distance); None for
+            the baseline.
+        tuned (dict): Settings from <model>_tuned.json (shown in the title).
+        path (str): Where to save the PNG.
+    """
     n_cols = 1 + (N_NEIGHBOURS if neighbours else 0)
     # At least 6 inches wide, so the title fits when there is only one column (baseline).
     fig, axes = plt.subplots(len(rows), n_cols, figsize=(max(2.4 * n_cols, 6), 2.8 * len(rows)), squeeze=False)
@@ -179,6 +265,14 @@ def show(name, rows, probs, neighbours, tuned, path):
 
 
 def main():
+    """
+    Parse the options, choose the test images (given IDs, --autopsy or a random sample),
+    classify them with the saved model and settings, print the results and save a figure.
+
+    Raises:
+        SystemExit: If the weights, tuned settings or saved predictions are missing, or a
+            requested image is not in the test split.
+    """
     parser = argparse.ArgumentParser(description="Classify test images with a trained model.")
     parser.add_argument("--model", choices=["baseline", "siamese"], default="siamese")
     parser.add_argument("--show_full_test", action="store_true",
