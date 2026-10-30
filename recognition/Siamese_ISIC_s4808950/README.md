@@ -164,7 +164,7 @@ The split, the metrics and the reject-rule protocol stay fixed throughout, so an
 | [`metrics.py`](metrics.py) | Helper with measurement and plotting functions only: discrimination metrics, ECE, risk-coverage/AURC, single-image latency and the evaluation plots. |
 | [`predict.py`](predict.py) | Example usage: loads the saved weights and tuned settings, classifies chosen or random test images, prints the results, draws the figures and runs the failure autopsy. |
 | `images/` | Figures used in this README (copied from `outputs/`). |
-| `outputs/` | Generated files from the final run: training and prediction logs, tuned settings, JSON/CSV test results and plots. The model weights (`*_best.pt`) and the cached Siamese reference bank (`siamese_bank.pt`) are not committed (`.gitignore`); rerun `train.py` to recreate them. |
+| `outputs/` | Generated files from the final run: training and prediction logs, tuned settings and JSON/CSV test results. The scripts also save their plots here; the committed copies are in `images/`. The model weights (`*_best.pt`) and the cached Siamese reference bank (`siamese_bank.pt`) are not committed (`.gitignore`); rerun `train.py` to recreate them. |
 | `data/` | The dataset and `splits.csv`. Not committed (`.gitignore`); see Section 3.3. |
 
 ### 3.2 Dependencies
