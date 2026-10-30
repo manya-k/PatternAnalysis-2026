@@ -58,6 +58,13 @@ TEST = False
 RECALL_TARGET = 0.95
 K_CANDIDATES = (3, 5, 10, 15, 20, 25, 30, 50, 75, 100, 150, 200) 
 def parse_args():
+    """
+    Read the command-line options and copy them into the module-level settings.
+
+    Returns:
+        argparse.Namespace: The parsed options, including the --test_only and
+            --skip_training flags that main() checks.
+    """
     global MODEL_CHOICE, EPOCHS, BATCH_SIZE, PATIENCE, NUM_WORKERS, SEED, MARGIN
 
     parser = argparse.ArgumentParser(description="Train the melanoma classifiers.")
@@ -82,7 +89,12 @@ def parse_args():
     return args
 
 def pick_device():
-    """Best available device: CUDA (Rangpur), MPS (Mac GPU), else CPU."""
+    """
+    Best available device: CUDA (Rangpur), MPS (Mac GPU), else CPU.
+
+    Returns:
+        torch.device: The device to train and evaluate on.
+    """
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -106,11 +118,17 @@ class PeakMemory:
             torch.cuda.reset_peak_memory_stats()
 
     def update(self):
+        """Record the current MPS memory if it is a new peak (CUDA tracks its own peak)."""
         if self.device.type == "mps":
             self.peak_bytes = max(self.peak_bytes, torch.mps.driver_allocated_memory())
 
     def peak_gib(self):
-        """Peak memory in GiB, or None on CPU."""
+        """
+        Peak memory in GiB, or None on CPU.
+
+        Returns:
+            float or None: Peak memory in GiB, or None on CPU.
+        """
         if self.device.type == "cuda":
             return torch.cuda.max_memory_allocated() / 2**30
         if self.device.type == "mps":
@@ -124,6 +142,15 @@ def sample_split(df, split, size, seed):
 
     Sampling the table (rather than a Dataset) lets every dataset built from it, single
     images, pairs and the kNN reference bank, share the same smaller set for smoke tests.
+
+    Args:
+        df (pd.DataFrame): All rows, with a "split" column.
+        split (str): "train", "val" or "test".
+        size (int or None): Number of rows to sample; None keeps the whole split.
+        seed (int): Random seed for the sample.
+
+    Returns:
+        pd.DataFrame: The rows of the split, or a sample of them.
     """
     rows = df[df["split"] == split]
     if size is None or size >= len(rows):
@@ -138,13 +165,32 @@ def class_weights(targets):
 
     weight_c = N / (2 * N_c). With ~21% melanoma this gives about [0.64, 2.35], so a
     missed melanoma costs ~3.7x more than a misclassified benign lesion.
+
+    Args:
+        targets (torch.Tensor): Training labels [N], 0 = benign, 1 = melanoma.
+
+    Returns:
+        torch.Tensor: One weight per class [2].
     """
     counts = torch.bincount(targets, minlength=2).float()
     return len(targets) / (2 * counts)
 
 
 def train_one_epoch(model, loader, loss_fn, optimizer, device, memory):
-    """One pass over the training data. Returns the mean training loss."""
+    """
+    One pass over the training data. Returns the mean training loss.
+
+    Args:
+        model (BaselineClassifier): The model being trained.
+        loader (DataLoader): Training images.
+        loss_fn (nn.Module): Class-weighted cross-entropy.
+        optimizer (torch.optim.Optimizer): The optimiser.
+        device (torch.device): Device to train on.
+        memory (PeakMemory): Peak GPU memory tracker, updated after every batch.
+
+    Returns:
+        float: Mean training loss over the epoch.
+    """
     model.train()
     total_loss, n = 0.0, 0
     for images, targets, _ in loader:
@@ -165,6 +211,15 @@ def evaluate(model, loader, loss_fn, device):
     Mean loss, AUROC and accuracy on a validation loader.
 
     AUROC uses the softmax probability of melanoma, so it does not depend on any threshold.
+
+    Args:
+        model (BaselineClassifier): The model to evaluate.
+        loader (DataLoader): Validation images.
+        loss_fn (nn.Module): The training loss.
+        device (torch.device): Device to run on.
+
+    Returns:
+        dict: {"loss", "auroc", "accuracy"}.
     """
     model.eval()
     total_loss, probs, labels = 0.0, [], []
@@ -183,7 +238,20 @@ def evaluate(model, loader, loss_fn, device):
 
 
 def train_one_epoch_siamese(model, loader, loss_fn, optimizer, device, memory):
-    """One pass over the training pairs. Returns the mean contrastive loss."""
+    """
+    One pass over the training pairs. Returns the mean contrastive loss.
+
+    Args:
+        model (SiameseNet): The model being trained.
+        loader (DataLoader): Training pairs (image a, image b, same).
+        loss_fn (ContrastiveLoss): The contrastive loss.
+        optimizer (torch.optim.Optimizer): The optimiser.
+        device (torch.device): Device to train on.
+        memory (PeakMemory): Peak GPU memory tracker, updated after every batch.
+
+    Returns:
+        float: Mean contrastive loss over the epoch.
+    """
     model.train()
     total_loss, n = 0.0, 0
     for img_a, img_b, same in loader:
@@ -200,7 +268,17 @@ def train_one_epoch_siamese(model, loader, loss_fn, optimizer, device, memory):
 
 @torch.no_grad()
 def embed_all(model, loader, device):
-    """Embed every image in a LesionDataset loader. Returns (embeddings [N, 128], labels [N])."""
+    """
+    Embed every image in a LesionDataset loader. Returns (embeddings [N, 128], labels [N]).
+
+    Args:
+        model (SiameseNet): The Siamese network.
+        loader (DataLoader): Single images (a LesionDataset loader).
+        device (torch.device): Device to embed on.
+
+    Returns:
+        tuple: (embeddings [N, 128], labels [N]), both on the CPU.
+    """
     model.eval()
     embeddings, labels = [], []
     for images, targets, _ in loader:
@@ -218,7 +296,16 @@ def knn_melanoma_probability(query, bank, bank_labels, k, melanoma_weight=1.0):
     balanced_melanoma_weight() both classes count equally, like the baseline's
     class-weighted loss; with 1.0 the ~79% benign bank pulls ambiguous cases towards benign.
 
-    Returns a score in [0, 1] per query, used like the baseline's softmax probability.
+    Args:
+        query (torch.Tensor): Embeddings to classify [Q, D].
+        bank (torch.Tensor): Reference embeddings [N, D].
+        bank_labels (torch.Tensor): Labels of the reference embeddings [N].
+        k (int): Number of neighbours.
+        melanoma_weight (float): Vote multiplier for melanoma neighbours.
+
+    Returns:
+        torch.Tensor: Melanoma score in [0, 1] per query [Q], used like the baseline's
+            softmax probability.
     """
     distances = torch.cdist(query, bank)                         # [Q, N]
     nearest_d, nearest_i = distances.topk(k, dim=1, largest=False)
@@ -228,12 +315,38 @@ def knn_melanoma_probability(query, bank, bank_labels, k, melanoma_weight=1.0):
 
 
 def balanced_melanoma_weight(bank_labels):
-    """Melanoma vote weight that makes both classes count equally: n_benign / n_melanoma."""
+    """
+    Melanoma vote weight that makes both classes count equally: n_benign / n_melanoma.
+
+    Args:
+        bank_labels (torch.Tensor): Labels of the reference bank [N].
+
+    Returns:
+        float: n_benign / n_melanoma.
+    """
     n_melanoma = int(bank_labels.sum())
     return (len(bank_labels) - n_melanoma) / n_melanoma
 
 
 def training_bank(model, train_df, device):
+    """
+    Embeddings of every training image: the reference bank the kNN vote searches.
+
+    The bank is cached in outputs/siamese_bank.pt and reused while siamese_best.pt is
+    unchanged (same modification time) and the training split has the same size, so
+    tuning, testing and predict.py do not re-embed the training images each time.
+
+    Args:
+        model (SiameseNet): The trained Siamese network.
+        train_df (pd.DataFrame): The training rows.
+        device (torch.device): Device to embed on.
+
+    Returns:
+        tuple: (embeddings [N, 128], labels [N]), both on the CPU.
+
+    Raises:
+        FileNotFoundError: If outputs/siamese_best.pt does not exist.
+    """
     weights_time = os.path.getmtime(os.path.join(OUT_DIR, "siamese_best.pt"))
     cache_path = os.path.join(OUT_DIR, "siamese_bank.pt")
     if os.path.exists(cache_path):
@@ -256,6 +369,18 @@ def evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, d
     reference bank, classify validation images by kNN, and compute AUROC/accuracy.
 
     The loss is the contrastive loss on a fixed set of validation pairs, for the curves.
+
+    Args:
+        model (SiameseNet): The model to evaluate.
+        bank_loader (DataLoader): Training images (the reference bank).
+        val_loader (DataLoader): Validation images.
+        val_pair_loader (DataLoader): Fixed validation pairs, for the loss.
+        loss_fn (ContrastiveLoss): The contrastive loss.
+        device (torch.device): Device to run on.
+        k (int): Number of neighbours in the vote.
+
+    Returns:
+        dict: {"loss", "auroc", "accuracy"}.
     """
     model.eval()
     total_loss, n = 0.0, 0
@@ -275,7 +400,13 @@ def evaluate_siamese(model, bank_loader, val_loader, val_pair_loader, loss_fn, d
 
 
 def plot_history(history, path):
-    """Training/validation loss and validation AUROC per epoch."""
+    """
+    Training/validation loss and validation AUROC per epoch.
+
+    Args:
+        history (list): One dict per epoch with train_loss, val_loss and val_auroc.
+        path (str): Where to save the PNG.
+    """
     epochs = [h["epoch"] for h in history]
     fig, (ax_loss, ax_auc) = plt.subplots(1, 2, figsize=(10, 4))
     ax_loss.plot(epochs, [h["train_loss"] for h in history], marker="o", label="train")
@@ -293,10 +424,29 @@ def plot_history(history, path):
     plt.close(fig)
 
 def loader(dataset, shuffle=False):
+    """
+    DataLoader with the batch size and worker count used everywhere in the project.
+
+    Args:
+        dataset (torch.utils.data.Dataset): A LesionDataset or PairDataset.
+        shuffle (bool): Shuffle each epoch (True only for training).
+
+    Returns:
+        DataLoader: The loader.
+    """
     return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=shuffle, num_workers=NUM_WORKERS)
 
 def setup_baseline(train_set, device):
-    """Model, loss and training loader for the baseline."""
+    """
+    Model, loss and training loader for the baseline.
+
+    Args:
+        train_set (pd.DataFrame): Training rows.
+        device (torch.device): Device to put the model on.
+
+    Returns:
+        dict: The model, loss_fn, train_loader and a details string for the log.
+    """
     weights = class_weights(torch.tensor(train_set["target"].values))
     return {
         "model": BaselineClassifier(pretrained=True).to(device),
@@ -307,7 +457,18 @@ def setup_baseline(train_set, device):
 
 
 def setup_siamese(train_set, val_set, device):
-    """Model, loss and loaders for the Siamese network."""
+    """
+    Model, loss and loaders for the Siamese network.
+
+    Args:
+        train_set (pd.DataFrame): Training rows.
+        val_set (pd.DataFrame): Validation rows.
+        device (torch.device): Device to put the model on.
+
+    Returns:
+        dict: The model, loss_fn, training pairs and loaders, validation pair loader,
+            reference bank loader and a details string for the log.
+    """
     # Pair sampling balances the classes, so no class weights are needed.
     train_pairs = PairDataset(train_set, "train", seed=SEED)
     return {
@@ -322,7 +483,13 @@ def setup_siamese(train_set, val_set, device):
 
 
 def save_training_summary(summary, weights_path):
-    """Save the history (for logs and the README), plot the curves and print a summary line."""
+    """
+    Save the history (for logs and the README), plot the curves and print a summary line.
+
+    Args:
+        summary (dict): Training settings, timings, peak memory and the per-epoch history.
+        weights_path (str): Path of the best checkpoint.
+    """
     with open(os.path.join(OUT_DIR, f"{MODEL_CHOICE}_history.json"), "w") as f:
         json.dump(summary, f, indent=2)
     plot_history(summary["history"], os.path.join(OUT_DIR, f"{MODEL_CHOICE}_curves.png"))
@@ -332,7 +499,18 @@ def save_training_summary(summary, weights_path):
           f"{'n/a (CPU)' if peak is None else f'{peak:.2f} GiB ({device})'}")
 
 def train_epochs(setup, optimizer, val_loader, device):
-    """Train with early stopping on val AUROC. Returns the path of the best checkpoint."""
+    """
+    Train with early stopping on val AUROC. Returns the path of the best checkpoint.
+
+    Args:
+        setup (dict): Output of setup_baseline or setup_siamese.
+        optimizer (torch.optim.Optimizer): The optimiser.
+        val_loader (DataLoader): Validation images.
+        device (torch.device): Device to train on.
+
+    Returns:
+        str: Path of the best checkpoint.
+    """
     history = []
     weights_path = os.path.join(OUT_DIR, f"{MODEL_CHOICE}_best.pt")
     start = time.time()
@@ -379,11 +557,24 @@ def train_epochs(setup, optimizer, val_loader, device):
 
 
 def print_heading(title):
-    """A blank line and a heading, so the training / tuning / testing output is easy to scan."""
+    """
+    A blank line and a heading, so the training / tuning / testing output is easy to scan.
+
+    Args:
+        title (str): The heading text.
+    """
     print(f"\n{'=' * 20} {title} {'=' * 20}\n")
 
 
 def main():
+    """
+    Run the full pipeline for one model: train (unless skipped), tune on validation,
+    test once, and draw the baseline vs Siamese test plots when both have been tested.
+
+    Raises:
+        FileNotFoundError: With --test_only or --skip_training, if the saved checkpoint or
+            tuned settings are missing.
+    """
     args = parse_args()
     torch.manual_seed(SEED)
     device = pick_device()
@@ -425,13 +616,37 @@ def main():
 
 
 def load_model(name, device):
-    """Rebuild the architecture and load the best weights saved by train_epochs."""
+    """
+    Rebuild the architecture and load the best weights saved by train_epochs.
+
+    Args:
+        name (str): "baseline" or "siamese".
+        device (torch.device): Device to load the model onto.
+
+    Returns:
+        nn.Module: The model in eval mode.
+
+    Raises:
+        FileNotFoundError: If outputs/<name>_best.pt does not exist.
+    """
     model = BaselineClassifier(pretrained=False) if name == "baseline" else SiameseNet(pretrained=False)
     model.load_state_dict(torch.load(os.path.join(OUT_DIR, f"{name}_best.pt"), map_location=device))
     return model.to(device).eval()
 
 
 def closure(optimizer, logits, log_t, labels):
+    """
+    One LBFGS evaluation: the cross-entropy of the logits divided by T = exp(log_t).
+
+    Args:
+        optimizer (torch.optim.LBFGS): The optimiser fitting log_t.
+        logits (torch.Tensor): Validation logits [N, 2].
+        log_t (torch.Tensor): Log of the temperature, the only parameter being fitted.
+        labels (torch.Tensor): Validation labels [N].
+
+    Returns:
+        torch.Tensor: The loss, detached, as LBFGS expects.
+    """
     optimizer.zero_grad()
     loss = torch.nn.functional.cross_entropy(logits / log_t.exp(), labels)
     loss.backward()
@@ -439,7 +654,16 @@ def closure(optimizer, logits, log_t, labels):
     
 def fit_temperature(logits, labels):
     """
-    Temperature scaling
+    Temperature scaling (Guo et al., 2017): find the single T that makes the softmax of
+    logits / T best match the validation labels (lowest cross-entropy). T rescales
+    confidence only, so predictions and AUROC do not change.
+
+    Args:
+        logits (torch.Tensor): Validation logits [N, 2].
+        labels (torch.Tensor): Validation labels [N].
+
+    Returns:
+        float: The fitted temperature T (> 0).
     """
     log_t = torch.zeros(1, requires_grad=True)  # optimise log T so that T stays positive
     optimizer = torch.optim.LBFGS([log_t], lr=0.1, max_iter=200)
@@ -450,7 +674,17 @@ def fit_temperature(logits, labels):
 
 @torch.no_grad()
 def baseline_logits(model, data_loader, device):
-    """Raw 2-class logits and labels for every image in a loader."""
+    """
+    Raw 2-class logits and labels for every image in a loader.
+
+    Args:
+        model (BaselineClassifier): The trained baseline.
+        data_loader (DataLoader): Images to score.
+        device (torch.device): Device to run on.
+
+    Returns:
+        tuple: (logits [N, 2], labels [N]), both on the CPU.
+    """
     logits, labels = [], []
     for images, targets, _ in data_loader:
         logits.append(model(images.to(device)).cpu())
@@ -458,10 +692,32 @@ def baseline_logits(model, data_loader, device):
     return torch.cat(logits), torch.cat(labels)
 
 def melanoma_probability_from_logits(logits, temperature=1.0):
+    """
+    Softmax probability of melanoma from the baseline's logits.
+
+    Args:
+        logits (torch.Tensor): Logits [N, 2].
+        temperature (float): Temperature T; 1.0 gives the uncalibrated softmax.
+
+    Returns:
+        torch.Tensor: Melanoma probability per image [N].
+    """
     return (logits / temperature).softmax(dim=1)[:, 1]
 
 
 def handle_baseline_eval(model, val_loader, result, device):
+    """
+    Tune the baseline on validation: fit the temperature and report ECE before and after.
+
+    Args:
+        model (BaselineClassifier): The best baseline checkpoint.
+        val_loader (DataLoader): Validation images.
+        result (dict): Tuned settings so far; temperature and ECE values are added.
+        device (torch.device): Device to run on.
+
+    Returns:
+        tuple: (calibrated validation melanoma probabilities, validation labels, result).
+    """
     val_logits, val_labels = baseline_logits(model, val_loader, device)
     
     # bc baseline produces logits, the temperature needs to be adjusted
@@ -486,6 +742,16 @@ def handle_siamese_eval(model, val_loader, result, device, train_df):
     The chosen setting refers the fewest val cases while still meeting the reject rule's
     melanoma-recall target (README criterion 4); ties are broken by AURC. AURC alone would
     always prefer the plain vote, which never meets the recall target (every case referred).
+
+    Args:
+        model (SiameseNet): The best Siamese checkpoint.
+        val_loader (DataLoader): Validation images.
+        result (dict): Tuned settings so far; k, vote, melanoma weight and k_scores are added.
+        device (torch.device): Device to run on.
+        train_df (pd.DataFrame): Training rows (the reference bank).
+
+    Returns:
+        tuple: (validation melanoma scores with the chosen setting, validation labels, result).
     """
     bank, bank_labels = training_bank(model, train_df, device)
     val_embeddings, val_labels = embed_all(model, val_loader, device)
@@ -509,6 +775,7 @@ def handle_siamese_eval(model, val_loader, result, device, train_df):
                   f"melanoma recall {k_scores[vote][k]['val_melanoma_recall']:.3f} | referred {reject['referred']:.1%}")
 
     def selection_key(vote_and_k):
+        """Sort key for a (vote, k) setting: fewest referred first, then lowest AURC."""
         scores = k_scores[vote_and_k[0]][vote_and_k[1]]
         return scores["val_referred"], scores["val_aurc"]
 
@@ -528,6 +795,20 @@ def handle_siamese_eval(model, val_loader, result, device, train_df):
 
 
 def tune_model(model, device, train_df, val_loader):
+    """
+    Fix every setting on validation data, then choose the reject threshold and save it all
+    to outputs/<model>_tuned.json for the test step and predict.py.
+
+    Args:
+        model (nn.Module): The best checkpoint of the current model.
+        device (torch.device): Device to run on.
+        train_df (pd.DataFrame): Training rows (the Siamese reference bank).
+        val_loader (DataLoader): Validation images.
+
+    Returns:
+        dict: The tuned settings (temperature, or k, vote and melanoma weight) and the
+            reject rule's validation outcome, including its threshold.
+    """
     print_heading(f"VALIDATION TUNING ({MODEL_CHOICE})")
     result = {}
     start = time.time()
@@ -555,7 +836,18 @@ def tune_model(model, device, train_df, val_loader):
     return result
 
 def apply_reject_rule(labels, probs, threshold):
-    """Outcome of the reject rule on one split."""
+    """
+    Outcome of the reject rule on one split.
+
+    Args:
+        labels (np.ndarray): True labels [N].
+        probs (np.ndarray): Melanoma probabilities [N].
+        threshold (float): Confidence threshold; inf refers every case.
+
+    Returns:
+        dict: Threshold, share auto-decided and referred, accuracy and melanoma recall
+            among auto-decided cases, melanomas missed and system sensitivity.
+    """
     confidence, correct = confidence_and_correct(labels, probs)
     preds = (probs >= 0.5).astype(int)
     auto = confidence >= threshold
@@ -576,6 +868,14 @@ def choose_threshold(labels, probs, target_recall=RECALL_TARGET):
     Reject rule, fitted on VALIDATION: auto-decide a case only if its confidence >= t,
     otherwise refer it. Returns the smallest t (i.e. the most cases automated) for which
     melanoma recall among the auto-decided cases is >= target_recall.
+
+    Args:
+        labels (np.ndarray): Validation labels [N].
+        probs (np.ndarray): Validation melanoma probabilities [N].
+        target_recall (float): Required melanoma recall among auto-decided cases.
+
+    Returns:
+        float: The threshold, or inf if no threshold reaches the target.
     """
     confidence, _ = confidence_and_correct(labels, probs)
     preds = (probs >= 0.5).astype(int)
@@ -588,6 +888,21 @@ def choose_threshold(labels, probs, target_recall=RECALL_TARGET):
 
 @torch.no_grad()
 def melanoma_scores(name, model, data_loader, device, tuned, train_df):
+    """
+    Melanoma probability for every image in a loader, using the tuned settings: the
+    temperature-scaled softmax for the baseline, the tuned kNN vote for the Siamese model.
+
+    Args:
+        name (str): "baseline" or "siamese".
+        model (nn.Module): The trained model.
+        data_loader (DataLoader): Images to score.
+        device (torch.device): Device to run on.
+        tuned (dict): Settings from tune_model.
+        train_df (pd.DataFrame): Training rows (the Siamese reference bank).
+
+    Returns:
+        tuple: (labels, melanoma probabilities), both NumPy arrays [N].
+    """
     model.eval()
     if name == "baseline":
         logits, labels = baseline_logits(model, data_loader, device)
@@ -600,6 +915,22 @@ def melanoma_scores(name, model, data_loader, device, tuned, train_df):
 
 
 def one_image_predictor(name, model, device, tuned, train_df):
+    """
+    A function that scores one image the way the deployed tool would, for the latency test.
+
+    The Siamese bank is embedded once here, so the timed call includes only the image's
+    own embedding and the kNN search.
+
+    Args:
+        name (str): "baseline" or "siamese".
+        model (nn.Module): The trained model.
+        device (torch.device): Device to run on.
+        tuned (dict): Settings from tune_model.
+        train_df (pd.DataFrame): Training rows (the Siamese reference bank).
+
+    Returns:
+        callable: Maps an image batch [1, 3, 224, 224] to its melanoma probability.
+    """
     if name == "baseline":
         return lambda image: melanoma_probability_from_logits(model(image), tuned["temperature"])
     bank, bank_labels = training_bank(model, train_df, device)
@@ -611,6 +942,15 @@ def results_by_source(sources, labels, probs, threshold):
     """
     Discrimination and reject-rule results for each ID source (IP / HAM / dummy) separately,
     to check whether performance depends on the data source (README risk 2).
+
+    Args:
+        sources (np.ndarray): ID source of each image ("IP", "HAM" or "dummy").
+        labels (np.ndarray): True labels [N].
+        probs (np.ndarray): Melanoma probabilities [N].
+        threshold (float): The reject threshold chosen on validation.
+
+    Returns:
+        dict: Per source, {"discrimination": ..., "reject_rule": ...}.
     """
     results = {}
     for source in ID_SOURCES:
@@ -624,6 +964,22 @@ def results_by_source(sources, labels, probs, threshold):
 
 
 def test_model(model, device, train_df, test_df, tuned):
+    """
+    Evaluate the model once on the test split with the settings fixed on validation.
+
+    Saves outputs/<model>_test_results.json (all metrics, overall and per ID source) and
+    outputs/<model>_test_predictions.csv (one row per test image), and prints a summary.
+
+    Args:
+        model (nn.Module): The trained model.
+        device (torch.device): Device to run on.
+        train_df (pd.DataFrame): Training rows (the Siamese reference bank).
+        test_df (pd.DataFrame): Test rows.
+        tuned (dict): Settings from tune_model.
+
+    Returns:
+        dict: The test results that were saved.
+    """
     print_heading(f"TESTING {MODEL_CHOICE}")
     test_dataset = LesionDataset(test_df, "test")
     labels, probs = melanoma_scores(MODEL_CHOICE, model, loader(test_dataset), device, tuned, train_df)
@@ -668,6 +1024,11 @@ def test_model(model, device, train_df, test_df, tuned):
 
 
 def plot_test_comparison():
+    """
+    Draw the baseline vs Siamese test plots (ROC and PR curves, reliability diagram,
+    risk-coverage) from both models' saved test predictions. Skipped with a message if
+    either model has not been tested yet.
+    """
     paths = {}
     for name in ("baseline", "siamese"):
         paths[name] = os.path.join(OUT_DIR, f"{name}_test_predictions.csv")

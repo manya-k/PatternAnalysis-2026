@@ -25,7 +25,17 @@ LATENCY_IMAGES = 50    # images timed one at a time for the latency measurement
 
 
 def discrimination_metrics(labels, probs):
-    """Standard metrics at the 0.5 decision threshold, plus threshold-free AUROC/PR-AUC."""
+    """
+    Standard metrics at the 0.5 decision threshold, plus threshold-free AUROC/PR-AUC.
+
+    Args:
+        labels (np.ndarray): True labels [N].
+        probs (np.ndarray): Melanoma probabilities [N].
+
+    Returns:
+        dict: Counts, accuracy, per-class precision and recall, macro-F1, AUROC, PR-AUC
+            and the confusion matrix. AUROC and PR-AUC are None if only one class is present.
+    """
     preds = (probs >= 0.5).astype(int)
     precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, labels=[0, 1], zero_division=0)
     both_classes = len(np.unique(labels)) == 2
@@ -43,7 +53,16 @@ def discrimination_metrics(labels, probs):
 
 
 def confidence_and_correct(labels, probs):
-    """Confidence = probability of the predicted class, max(p, 1 - p), in [0.5, 1]."""
+    """
+    Confidence = probability of the predicted class, max(p, 1 - p), in [0.5, 1].
+
+    Args:
+        labels (np.ndarray): True labels [N].
+        probs (np.ndarray): Melanoma probabilities [N].
+
+    Returns:
+        tuple: (confidence [N], correct [N] as booleans).
+    """
     preds = (probs >= 0.5).astype(int)
     return np.maximum(probs, 1 - probs), preds == labels
 
@@ -55,6 +74,14 @@ def calibration(confidence, correct, n_bins=N_BINS):
     that says "90% sure" should be right 90% of the time; ECE measures how far off it is.
 
     This block of code is inspired from https://github.com/feder-cr/jev/wiki/expected-calibration-error-explained
+
+    Args:
+        confidence (np.ndarray): Confidence of each prediction, in [0.5, 1].
+        correct (np.ndarray): True where the prediction was correct.
+        n_bins (int): Number of equal-width confidence bins.
+
+    Returns:
+        tuple: (ECE as a float, list of {"confidence", "accuracy", "count"} per non-empty bin).
     """
     edges = np.linspace(0.5, 1.0, n_bins + 1)
     bins = np.clip(np.digitize(confidence, edges[1:-1]), 0, n_bins - 1)
@@ -99,7 +126,12 @@ def risk_coverage(confidence, correct):
 
 
 def synchronize(device):
-    """Wait for queued GPU work to finish so timings are real."""
+    """
+    Wait for queued GPU work to finish so timings are real.
+
+    Args:
+        device (torch.device): The device whose queued work to wait for.
+    """
     if device.type == "cuda":
         torch.cuda.synchronize()
     elif device.type == "mps":
@@ -111,6 +143,14 @@ def single_image_latency_ms(predict_one, dataset, device):
     """
     Median time to classify one image (batch size 1). predict_one(image) runs the whole
     prediction, so for the Siamese model it should include the kNN search.
+
+    Args:
+        predict_one (callable): Maps one image [1, 3, 224, 224] to a prediction.
+        dataset (LesionDataset): Images to time; the first 5 are warm-up.
+        device (torch.device): Device to run on.
+
+    Returns:
+        float: Median latency in milliseconds.
     """
     times = []
     for i in range(min(LATENCY_IMAGES + 5, len(dataset))):
@@ -194,6 +234,12 @@ def plot_k_tuning(k_scores, chosen_k, chosen_vote, path):
     """
     Validation AURC and referral rate for each candidate k, one line per kNN vote
     (plain / class-balanced), with the chosen setting marked.
+
+    Args:
+        k_scores (dict): Vote name to {k: {"val_aurc", "val_referred", ...}}.
+        chosen_k (int): The selected k.
+        chosen_vote (str): The selected vote ("plain" or "balanced").
+        path (str): Where to save the PNG.
     """
     fig, (ax_aurc, ax_referred) = plt.subplots(1, 2, figsize=(10, 4))
     for vote, scores in k_scores.items():
